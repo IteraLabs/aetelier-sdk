@@ -1,0 +1,64 @@
+# ═══════════════════════════════════════════════════════════════════════════
+# Bybit — 3 symbols (BTCUSDT, ETHUSDT, SOLUSDT)
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# Usage:
+#   cargo run -p aetelier-connect --example multi_sync_workers --features parquet \
+#     -- --config examples/multi_sync/bybit_3symbols.toml
+
+# ── Shared defaults ──────────────────────────────────────────────────────
+
+[defaults]
+sync_mode       = "on_trade"
+flush_threshold = 36000          # 36000 × 100 ms = 1 hour per parquet file
+
+[defaults.update_frequency]
+value = 100
+unit  = "Millis"
+
+[defaults.datatypes.orderbook]
+enabled = true
+depth = 50
+
+[defaults.datatypes.trades]
+enabled = true
+
+[defaults.datatypes.liquidations]
+enabled = true
+
+[defaults.datatypes.funding_rates]
+enabled = true
+
+[defaults.datatypes.open_interest]
+enabled = true
+
+[defaults.logs]
+n_orderbooks     = 1000
+n_trades         = 500
+n_liquidations   = 10
+n_fundings       = 50
+n_open_interests = 50
+
+# ── Per-symbol workers ───────────────────────────────────────────────────
+
+[[workers]]
+exchange = "bybit"
+symbol   = "BTCUSDT"
+
+[[workers]]
+exchange = "bybit"
+symbol   = "ETHUSDT"
+
+[[workers]]
+exchange = "bybit"
+symbol   = "SOLUSDT"
+
+# ── Output ───────────────────────────────────────────────────────────────
+
+[output]
+base_dir = "datasets/collected"
+
+# ── Session ──────────────────────────────────────────────────────────────
+
+[session]
+duration_hours = 8

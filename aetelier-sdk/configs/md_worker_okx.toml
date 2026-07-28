@@ -1,0 +1,56 @@
+# OKX USDT pairs — books5 top-5 snapshot + raw trades, count-based flush
+#
+#   cargo run -p aetelier-sdk --bin md_worker --features parquet -- \
+#     --config aetelier-sdk/configs/md_worker_okx.toml
+
+[collect]
+exchange = "okx"
+framework_ingest = true
+gap_threshold_secs = 600
+
+[collect.datatypes.orderbook]
+enabled = true
+depth = 50          # OKX `books5` pushes a full top-5 snapshot; depth is informational
+
+[collect.datatypes.trades]
+enabled = true
+
+[collect.datatypes.liquidations]
+enabled = false
+
+[collect.datatypes.funding_rates]
+enabled = false
+
+[collect.datatypes.open_interest]
+enabled = false
+
+[collect.sync]
+sync_mode = "on_time"
+flush_threshold = 3600
+
+[collect.sync.update_frequency]
+value = 100
+unit = "Millis"
+
+[[collect.output]]
+type = "parquet"
+dir = "datasets/collected/okx/"
+
+[[collect.output]]
+type = "terminal"
+
+# ── Workers ──────────────────────────────────────────────
+# OKX instrument ids are hyphenated (e.g. BTC-USDT).
+
+[[workers]]
+symbol = "BTC-USDT"
+
+[[workers]]
+symbol = "ETH-USDT"
+
+[[workers]]
+symbol = "SOL-USDT"
+
+# ── Session ──────────────────────────────────────────────
+# [session]
+# duration_hours = N

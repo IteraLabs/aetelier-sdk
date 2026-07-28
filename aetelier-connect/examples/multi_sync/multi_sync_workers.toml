@@ -1,0 +1,75 @@
+# ═══════════════════════════════════════════════════════════════════════════
+# Multi-Worker Market Snapshot Configuration
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# Usage:
+#   cargo run -p aetelier-connect --example bybit_workers --features parquet \
+#     -- --config examples/market_sync/bybit/bybit_workers.toml
+#
+# Deploys 5 concurrent workers, each collecting a separate Bybit symbol.
+# Grid: 100 ms per snapshot.  Flush: every 36000 snapshots (1 hour).
+# Session: 8 hours (or Ctrl-C for early stop).
+#
+# Output structure (one tree per symbol):
+#   datasets/collected/bybit/{SYMBOL}/orderbooks/
+#   datasets/collected/bybit/{SYMBOL}/trades/
+#   datasets/collected/bybit/{SYMBOL}/liquidations/
+#   datasets/collected/bybit/{SYMBOL}/fundings/
+#   datasets/collected/bybit/{SYMBOL}/open_interests/
+
+# ── Shared defaults applied to all workers ────────────────────────────────
+
+[defaults]
+sync_mode       = "on_trade"
+flush_threshold = 36000          # 36000 × 100 ms = 1 hour per parquet file
+
+[defaults.update_frequency]
+value = 100
+unit  = "Millis"
+
+[defaults.datatypes.orderbook]
+enabled = true
+depth = 50
+
+[defaults.datatypes.trades]
+enabled = true
+
+[defaults.datatypes.liquidations]
+enabled = true
+
+[defaults.datatypes.funding_rates]
+enabled = true
+
+[defaults.datatypes.open_interest]
+enabled = true
+
+[defaults.logs]
+n_orderbooks    = 1000            # higher thresholds for multi-worker
+n_trades        = 500
+n_liquidations  = 10
+n_fundings      = 50
+n_open_interests = 50
+
+# ── Per-symbol workers ────────────────────────────────────────────────────
+
+[[workers]]
+exchange = "bybit"
+symbol   = "BTCUSDT"
+
+[[workers]]
+exchange = "bybit"
+symbol   = "ETHUSDT"
+
+[[workers]]
+exchange = "bybit"
+symbol   = "SOLUSDT"
+
+# ── Output ────────────────────────────────────────────────────────────────
+
+[output]
+base_dir = "datasets/collected"
+
+# ── Session ───────────────────────────────────────────────────────────────
+
+[session]
+duration_hours = 8               # remove or set to null for indefinite run

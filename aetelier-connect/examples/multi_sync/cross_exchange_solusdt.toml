@@ -1,0 +1,59 @@
+# ═══════════════════════════════════════════════════════════════════════════
+# Cross-exchange — same symbol (SOL) across Bybit, Coinbase, Kraken
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# Usage:
+#   cargo run -p aetelier-connect --example multi_sync_workers --features parquet \
+#     -- --config examples/multi_sync/cross_exchange_solusdt.toml
+#
+# Collects SOLUSDT / SOL-USD / SOL/USD from all three exchanges
+# concurrently. Each worker writes to its own exchange-specific
+# output directory: datasets/collected/{exchange}/SOL*/
+
+# ── Shared defaults ──────────────────────────────────────────────────────
+
+[defaults]
+sync_mode       = "on_trade"
+flush_threshold = 36000
+
+[defaults.update_frequency]
+value = 100
+unit  = "Millis"
+
+[defaults.datatypes.orderbook]
+enabled = true
+depth = 50
+
+[defaults.datatypes.trades]
+enabled = true
+
+[defaults.logs]
+n_orderbooks     = 1000
+n_trades         = 500
+n_liquidations   = 0
+n_fundings       = 0
+n_open_interests = 0
+
+# ── Per-exchange workers (same underlying asset) ─────────────────────────
+
+[[workers]]
+exchange = "bybit"
+symbol   = "SOLUSDT"
+
+[[workers]]
+exchange = "coinbase"
+symbol   = "SOL-USD"
+
+[[workers]]
+exchange = "kraken"
+symbol   = "SOL/USD"
+
+# ── Output ───────────────────────────────────────────────────────────────
+
+[output]
+base_dir = "datasets/collected"
+
+# ── Session ──────────────────────────────────────────────────────────────
+
+[session]
+duration_hours = 8
