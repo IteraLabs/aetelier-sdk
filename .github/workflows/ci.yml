@@ -34,6 +34,14 @@ jobs:
         with:
           tool: cargo-nextest
       - uses: Swatinem/rust-cache@v2
+        with:
+        # cache-bin: false — rust-cache otherwise caches AND RESTORES
+        # $CARGO_HOME/bin. On a self-hosted runner that IS the host's real
+        # ~/.cargo, so a restore overwrites it with a copy that has no
+        # rustup binary, leaving every shim dangling and deleting the
+        # host's cargo-installed tools (observed 2026-07-30 on two runners).
+        # Only the bin dir is skipped; the registry/target cache still works.
+          cache-bin: false
 
       - name: cargo fmt (blocking)
         run: cargo fmt --all -- --check
@@ -73,6 +81,14 @@ jobs:
         with:
           tool: cargo-hack
       - uses: Swatinem/rust-cache@v2
+        with:
+        # cache-bin: false — rust-cache otherwise caches AND RESTORES
+        # $CARGO_HOME/bin. On a self-hosted runner that IS the host's real
+        # ~/.cargo, so a restore overwrites it with a copy that has no
+        # rustup binary, leaving every shim dangling and deleting the
+        # host's cargo-installed tools (observed 2026-07-30 on two runners).
+        # Only the bin dir is skipped; the registry/target cache still works.
+          cache-bin: false
 
       # Workspace builds unify features across members, masking per-crate
       # breakage that only appears when a crate is depended on in isolation.
@@ -90,6 +106,14 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.88.0
       - uses: Swatinem/rust-cache@v2
+        with:
+        # cache-bin: false — rust-cache otherwise caches AND RESTORES
+        # $CARGO_HOME/bin. On a self-hosted runner that IS the host's real
+        # ~/.cargo, so a restore overwrites it with a copy that has no
+        # rustup binary, leaving every shim dangling and deleting the
+        # host's cargo-installed tools (observed 2026-07-30 on two runners).
+        # Only the bin dir is skipped; the registry/target cache still works.
+          cache-bin: false
       - name: cargo check on the declared rust-version
         run: cargo check --locked --workspace
 
@@ -103,5 +127,13 @@ jobs:
         with:
           tool: cargo-deny
       - uses: Swatinem/rust-cache@v2
+        with:
+        # cache-bin: false — rust-cache otherwise caches AND RESTORES
+        # $CARGO_HOME/bin. On a self-hosted runner that IS the host's real
+        # ~/.cargo, so a restore overwrites it with a copy that has no
+        # rustup binary, leaving every shim dangling and deleting the
+        # host's cargo-installed tools (observed 2026-07-30 on two runners).
+        # Only the bin dir is skipped; the registry/target cache still works.
+          cache-bin: false
       - name: cargo deny check
         run: cargo deny check advisories bans licenses sources
