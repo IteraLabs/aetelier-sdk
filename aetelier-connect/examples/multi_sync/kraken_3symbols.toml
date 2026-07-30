@@ -1,0 +1,58 @@
+# ═══════════════════════════════════════════════════════════════════════════
+# Kraken — 3 symbols (BTC/USD, ETH/USD, SOL/USD)
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# Usage:
+#   cargo run -p aetelier-connect --example multi_sync_workers --features parquet \
+#     -- --config examples/multi_sync/kraken_3symbols.toml
+#
+# Kraken spot only supports orderbooks and trades (no liquidations,
+# funding rates, or open interest — those require Kraken Futures).
+
+# ── Shared defaults ──────────────────────────────────────────────────────
+
+[defaults]
+sync_mode       = "on_trade"
+flush_threshold = 36000
+
+[defaults.update_frequency]
+value = 100
+unit  = "Millis"
+
+[defaults.datatypes.orderbook]
+enabled = true
+depth = 25
+
+[defaults.datatypes.trades]
+enabled = true
+
+[defaults.logs]
+n_orderbooks     = 1000
+n_trades         = 500
+n_liquidations   = 0
+n_fundings       = 0
+n_open_interests = 0
+
+# ── Per-symbol workers ───────────────────────────────────────────────────
+
+[[workers]]
+exchange = "kraken"
+symbol   = "BTC/USD"
+
+[[workers]]
+exchange = "kraken"
+symbol   = "ETH/USD"
+
+[[workers]]
+exchange = "kraken"
+symbol   = "SOL/USD"
+
+# ── Output ───────────────────────────────────────────────────────────────
+
+[output]
+base_dir = "datasets/collected"
+
+# ── Session ──────────────────────────────────────────────────────────────
+
+[session]
+duration_hours = 8

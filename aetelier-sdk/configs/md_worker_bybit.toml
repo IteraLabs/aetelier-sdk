@@ -1,0 +1,61 @@
+# Bybit
+#
+# MarketWorker Example — synchronised snapshots to Parquet
+#
+# Usage:
+# cargo run -p aetelier-connect --example run_market_worker --features parquet \
+# -- --config aetelier-connect/examples/market_worker/market_worker_bybit.toml
+
+[collect]
+exchange = "bybit"
+framework_ingest = true
+gap_threshold_secs = 30
+
+[collect.datatypes.orderbook]
+enabled = true
+depth = 50
+
+[collect.datatypes.trades]
+enabled = true
+
+[collect.datatypes.liquidations]
+enabled = false
+
+[collect.datatypes.funding_rates]
+enabled = false
+
+[collect.datatypes.open_interest]
+enabled = false
+
+[collect.sync]
+sync_mode = "on_time"
+flush_threshold = 18000  # snapshots per Parquet flush (10 * 60 * 60 = 36000ms / 2 = 0.5 hour)
+
+[collect.sync.update_frequency]
+value = 200
+unit = "Millis"
+
+# Dual output: Parquet for persistence + Terminal for visibility.
+[[collect.output]]
+type = "parquet"
+dir = "datasets/collected/bybit/"
+
+[[collect.output]]
+type = "terminal"
+
+# ── Workers ─────────────────────────────────────────────────────────────
+
+[[workers]]
+symbol = "BTCUSDT"
+
+[[workers]]
+symbol = "ETHUSDT"
+
+[[workers]]
+symbol = "SOLUSDT"
+
+# ── Session ─────────────────────────────────────────────────────────────
+
+# [session]
+# Run for N seconds then shut down gracefully.
+# duration_hours = N

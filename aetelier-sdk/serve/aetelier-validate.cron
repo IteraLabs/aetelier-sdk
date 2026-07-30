@@ -1,0 +1,30 @@
+# aetelier-sdk/serve/aetelier-validate.cron
+#
+# Drop this file into /etc/cron.d/aetelier-validate (root-owned, mode 0644).
+# The wrapper script must already exist at /usr/local/bin/run_validate.sh
+# (or wherever you prefer — adjust the path below). The image
+# `aetelier-validate:v0.1.0` should be present on the host;
+# build it once with:
+#
+#   docker build -t aetelier-validate:v0.1.0 \
+#                -f aetelier-sdk/serve/validate.Dockerfile .
+#
+# A standard /etc/cron.d entry needs an explicit user column.
+#
+# Cadence rationale: with the default md_worker config (flush_threshold=3600,
+# grid=100ms ⇒ ~6-minute parquet files) every 10 minutes lets the validator
+# inspect each new file roughly twice without piling up overlapping runs.
+# Tighten to */5 if you want quicker feedback or relax to */30 on quiet
+# weekends.
+
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+MAILTO=ops@example.com
+
+#  ┌─ minute (0-59)
+#  │   ┌─ hour (0-23)
+#  │   │  ┌─ day of month (1-31)
+#  │   │  │ ┌─ month (1-12)
+#  │   │  │ │ ┌─ day of week (0-6, Sun=0)
+#  │   │  │ │ │ user      command
+*/10  *  * * * root      /usr/local/bin/run_validate.sh

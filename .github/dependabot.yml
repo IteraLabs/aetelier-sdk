@@ -1,0 +1,23 @@
+version: 2
+updates:
+  # Cargo version bumps are made deliberately by a maintainer: Cargo.lock is
+  # committed and every CI step runs --locked, so the repo's builds and the
+  # released binaries are reproducible. Dependabot *security* updates are
+  # governed by the repository's security settings and are unaffected by
+  # open-pull-requests-limit, so advisories still surface as PRs; cargo-deny's
+  # advisories check is the blocking gate on top of that.
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 0
+
+  # dtolnay/rust-toolchain is pinned to the declared MSRV in the msrv job.
+  # Bumping it would silently raise the floor the job exists to defend, so it
+  # is updated by hand alongside rust-version in Cargo.toml.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    ignore:
+      - dependency-name: "dtolnay/rust-toolchain"

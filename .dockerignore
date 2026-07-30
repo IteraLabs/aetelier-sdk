@@ -1,0 +1,7 @@
+target/
+.git/
+*.log
+.github/
+assets/
+docs/
+rust-clippy-results.sarif

@@ -1,0 +1,92 @@
+[package]
+name = "aetelier-io"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Read/write Parquet, CSV, and JSON for aetelier-sdk market data types"
+documentation = "https://docs.rs/aetelier-io"
+readme = "README.md"
+homepage.workspace = true
+repository.workspace = true
+license.workspace = true
+keywords = ["crypto", "framework", "machine-learning", "math", "trading"]
+categories = ["data-structures", "development-tools", "finance", "simulation"]
+publish = false
+
+[package.metadata.docs.rs]
+features = ["parquet"]
+
+[lib]
+name = "aetelier_io"
+path = "src/lib.rs"
+
+[[test]]
+name = "test_orderbook_parquet_roundtrip"
+path = "tests/types/order_books/test_orderbook_parquet_roundtrip.rs"
+required-features = ["parquet"]
+
+[[test]]
+name = "test_orderbook_persist"
+path = "tests/types/order_books/test_orderbook_persist.rs"
+
+[[test]]
+name = "test_csv_json_roundtrip"
+path = "tests/types/order_books/test_csv_json_roundtrip.rs"
+
+[[test]]
+name = "test_trades_parquet_corrupt"
+path = "tests/types/trades/test_trades_parquet_corrupt.rs"
+required-features = ["parquet"]
+
+[[test]]
+name = "test_trades_parquet_roundtrip"
+path = "tests/types/trades/test_trades_parquet_roundtrip.rs"
+required-features = ["parquet"]
+
+[[test]]
+name = "test_liquidations_parquet_roundtrip"
+path = "tests/types/liquidations/test_liquidations_parquet_roundtrip.rs"
+required-features = ["parquet"]
+
+[[test]]
+name = "test_funding_parquet_roundtrip"
+path = "tests/types/funding_rates/test_funding_parquet_roundtrip.rs"
+required-features = ["parquet"]
+
+[[test]]
+name = "test_oi_parquet_roundtrip"
+path = "tests/types/open_interest/test_oi_parquet_roundtrip.rs"
+required-features = ["parquet"]
+
+[dependencies]
+aetelier-connect = { path = "../aetelier-connect", version = "0.1.0", optional = true }
+aetelier-types = { path = "../aetelier-types", version = "0.1.0" }
+
+arrow = { version = "57.2", optional = true }
+async-trait = { version = "0.1" }
+chrono = { version = "0.4", features = ["serde"] }
+csv = { version = "1.3" }
+parquet = { version = "57.2", optional = true }
+rust_decimal = { version = "1.34", features = ["serde"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = { version = "1.0" }
+tch = { version = "0.20.0", optional = true }
+thiserror = { version = "1.0.64" }
+tokio = { version = "1", features = ["full"] }
+toml = { version = "0.8" }
+tracing = { version = "0.1" }
+
+[dev-dependencies]
+aetelier-connect = { path = "../aetelier-connect" }
+serde_json = "1.0"
+tempfile = "3"
+
+[features]
+default = []
+connect = ["dep:aetelier-connect"]
+parquet = ["dep:arrow", "dep:parquet"]
+torch = ["dep:tch"]
+
+[lints]
+workspace = true

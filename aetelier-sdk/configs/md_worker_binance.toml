@@ -1,0 +1,52 @@
+# Binance USDC pairs — top-20 LOB + raw trades, count-based flush
+
+[collect]
+exchange = "binance"
+framework_ingest = true
+gap_threshold_secs = 600
+
+[collect.datatypes.orderbook]
+enabled = true
+depth = 25
+
+[collect.datatypes.trades]
+enabled = true
+
+[collect.datatypes.liquidations]
+enabled = false
+
+[collect.datatypes.funding_rates]
+enabled = false
+
+[collect.datatypes.open_interest]
+enabled = false
+
+[collect.sync]
+sync_mode = "on_time"
+flush_threshold = 3600
+
+[collect.sync.update_frequency]
+value = 100
+unit = "Millis"
+
+[[collect.output]]
+type = "parquet"
+dir = "datasets/collected/binance/"
+
+[[collect.output]]
+type = "terminal"
+
+# ── Workers ──────────────────────────────────────────────────
+
+[[workers]]
+symbol = "BTCUSDC"
+
+[[workers]]
+symbol = "SOLUSDC"
+
+[[workers]]
+symbol = "SHIBUSDC"
+
+[[workers]]
+symbol = "TONUSDC"
+

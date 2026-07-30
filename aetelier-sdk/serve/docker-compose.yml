@@ -1,0 +1,85 @@
+name: aetelier-serve
+
+services:
+  binance:
+    image: aetelier-md-worker:v0.1.0
+    container_name: md_worker_binance
+    labels:
+      aetelier.lifecycle: "legacy"
+      aetelier.component: "aetelier-md-worker"
+    restart: unless-stopped
+    volumes:
+      - ./configs/md_worker_binance.toml:/configs/manifest.toml:ro
+      - ./datasets:/data
+    environment:
+      - RUST_LOG=aetelier_connect=info,aetelier_sdk=info,md_worker=info
+      - TZ=UTC
+    logging:
+      driver: json-file
+      options:
+        max-size: "100m"
+        max-file: "5"
+
+  coinbase:
+    image: aetelier-md-worker:v0.1.0
+    container_name: md_worker_coinbase
+    restart: unless-stopped
+    volumes:
+      - ./configs/md_worker_coinbase.toml:/configs/manifest.toml:ro
+      - ./datasets:/data
+    environment:
+      - RUST_LOG=aetelier_connect=info,aetelier_sdk=info,md_worker=info
+      - TZ=UTC
+    logging:
+      driver: json-file
+      options:
+        max-size: "100m"
+        max-file: "5"
+
+  kraken:
+    image: aetelier-md-worker:v0.1.0
+    container_name: md_worker_kraken
+    restart: unless-stopped
+    volumes:
+      - ./configs/md_worker_kraken.toml:/configs/manifest.toml:ro
+      - ./datasets:/data
+    environment:
+      - RUST_LOG=aetelier_connect=info,aetelier_sdk=info,md_worker=info
+      - TZ=UTC
+    logging:
+      driver: json-file
+      options:
+        max-size: "100m"
+        max-file: "5"
+
+  okx:
+    image: aetelier-md-worker:v0.1.0
+    container_name: md_worker_okx
+    restart: unless-stopped
+    volumes:
+      - ./configs/md_worker_okx.toml:/configs/manifest.toml:ro
+      - ./datasets:/data
+    environment:
+      - RUST_LOG=aetelier_connect=info,aetelier_sdk=info,md_worker=info
+      - TZ=UTC
+    logging:
+      driver: json-file
+      options:
+        max-size: "100m"
+        max-file: "5"
+
+  gateio:
+    image: aetelier-md-worker:v0.1.0
+    container_name: md_worker_gateio
+    restart: unless-stopped
+    volumes:
+      - ./configs/md_worker_gateio.toml:/configs/manifest.toml:ro
+      - ./datasets:/data
+    environment:
+      - RUST_LOG=aetelier_connect=info,aetelier_sdk=info,md_worker=info
+      - TZ=UTC
+    logging:
+      driver: json-file
+      options:
+        max-size: "100m"
+        max-file: "5"

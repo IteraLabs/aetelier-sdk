@@ -1,0 +1,70 @@
+[package]
+name = "aetelier-sdk"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "aetelier market-data engine: canonical types, exchange connectivity, columnar I/O, and telemetry in one crate"
+documentation = "https://docs.rs/aetelier-sdk"
+readme = "README.md"
+homepage.workspace = true
+repository.workspace = true
+license.workspace = true
+keywords = ["crypto", "framework", "math", "trading"]
+categories = ["data-structures", "development-tools", "finance", "simulation"]
+include = ["katex-header.html", "Cargo.toml", "LICENSE", "README.md", "src/**/*"]
+publish = false
+
+[package.metadata.docs.rs]
+features = ["parquet"]
+rustdoc-args = ["--html-in-header", "katex-header.html"]
+
+[lib]
+name = "aetelier_sdk"
+path = "src/lib.rs"
+
+[[bin]]
+name = "md_worker"
+path = "src/bin/md_worker.rs"
+required-features = ["parquet"]
+doc = false
+
+[[bin]]
+name = "validate"
+path = "src/bin/validate.rs"
+required-features = ["parquet"]
+
+[[bin]]
+name = "rehydrate"
+path = "src/bin/rehydrate.rs"
+required-features = ["parquet"]
+
+[dependencies]
+aetelier-connect = { path = "../aetelier-connect", version = "0.1.0" }
+aetelier-io = { path = "../aetelier-io", version = "0.1.0" }
+aetelier-telemetry = { path = "../aetelier-telemetry", version = "0.1.0" }
+aetelier-types = { path = "../aetelier-types", version = "0.1.0" }
+
+anyhow = { version = "1.0" }
+clap = { version = "4.5", features = ["derive"] }
+rust_decimal = { version = "1.34", features = ["serde"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = { version = "1.0" }
+thiserror = { version = "1.0" }
+tokio = { version = "1", features = ["full"] }
+tracing = { version = "0.1" }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[features]
+default = []
+
+connect = ["aetelier-io/connect"]
+parquet = [
+  "aetelier-connect/parquet",
+  "aetelier-io/connect",
+  "aetelier-io/parquet"
+]
+torch = ["aetelier-io/torch"]
+
+[lints]
+workspace = true

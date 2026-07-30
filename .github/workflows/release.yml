@@ -1,0 +1,65 @@
+# release — full gates + binaries on every version tag.
+#
+# Runs the complete CI gate against the tagged commit, builds the three
+# first-class binaries (md_worker, validate, rehydrate) in release mode for
+# linux-x64, and attaches them to the GitHub Release for the
+# tag. The Release itself is created by the maintainer (gh release create);
+# this workflow uploads artifacts to it.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  gates:
+    # Self-hosted, not ubuntu-latest: this workflow triggers on `push: tags`
+    # ONLY — there is no pull_request path, so a fork can never run code here
+    # (pushing a tag requires write access). That keeps self-hosted safe even
+    # after this repo goes public, unlike ci.yml which does take pull_request.
+    # It also keeps releases working while GitHub-hosted minutes are unavailable.
+    runs-on: [self-hosted, Linux, X64]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: taiki-e/install-action@nextest
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --locked --workspace --all-targets --features aetelier-sdk/parquet -- -D warnings
+      - run: cargo nextest run --locked --workspace --features aetelier-sdk/parquet
+      - run: cargo test --locked --workspace --doc
+
+  binaries:
+    needs: gates
+    strategy:
+      matrix:
+        include:
+          # ultradian-server is the Linux/X64 runner: built natively, no
+          # cross-compilation. macOS is deliberately NOT built here — the only
+          # macOS runner is the developer's own workstation, whose $HOME and
+          # CARGO_HOME the runner shares, so a CI job there mutates the
+          # developer's Rust install (it deleted ~/.cargo/bin/rustup on
+          # 2026-07-30). Docker images are Linux and never need a macOS build.
+          - os: [self-hosted, Linux, X64]
+            triple: x86_64-unknown-linux-gnu
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - name: build release binaries
+        run: cargo build --locked --release -p aetelier-sdk --features parquet --bin md_worker --bin validate --bin rehydrate
+      - name: package
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          for b in md_worker validate rehydrate; do
+            cp "target/release/$b" "dist/${b}-${{ github.ref_name }}-${{ matrix.triple }}"
+          done
+      - name: attach to release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "${{ github.ref_name }}" dist/* --clobber

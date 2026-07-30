@@ -1,0 +1,43 @@
+[package]
+name = "aetelier-telemetry"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "OpenTelemetry instrumentation for the aetelier-sdk engine"
+documentation = "https://docs.rs/aetelier-telemetry"
+readme = "README.md"
+homepage.workspace = true
+repository.workspace = true
+license.workspace = true
+keywords = ["crypto", "metrics", "observability", "opentelemetry", "trading"]
+categories = ["development-tools", "finance"]
+publish = false
+
+[lib]
+name = "aetelier_telemetry"
+path = "src/lib.rs"
+
+[[test]]
+name = "test_attributes"
+path = "tests/test_attributes.rs"
+
+[dependencies]
+thiserror = { version = "1.0.64" }
+opentelemetry = { version = "0.31" }
+opentelemetry-otlp = { version = "0.31", features = ["grpc-tonic", "metrics"] }
+opentelemetry_sdk = { version = "0.31", features = ["metrics", "rt-tokio"] }
+opentelemetry-stdout = { version = "0.31", features = ["metrics"] }
+serde = { version = "1.0", features = ["derive"] }
+tokio = { version = "1", features = ["full"] }
+toml = { version = "0.8" }
+tracing = { version = "0.1" }
+tracing-opentelemetry = { version = "0.32" }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+serde_json = { version = "1.0" }
+tokio = { version = "1", features = ["full", "test-util"] }
+
+[lints]
+workspace = true

@@ -1,0 +1,51 @@
+# Gate.io USDT pairs — spot.order_book snapshot + raw trades, count-based flush
+
+[collect]
+exchange = "gateio"
+framework_ingest = true
+gap_threshold_secs = 30
+
+[collect.datatypes.orderbook]
+enabled = true
+depth = 20
+
+[collect.datatypes.trades]
+enabled = true
+
+[collect.datatypes.liquidations]
+enabled = false
+
+[collect.datatypes.funding_rates]
+enabled = false
+
+[collect.datatypes.open_interest]
+enabled = false
+
+[collect.sync]
+sync_mode = "on_time"
+flush_threshold = 18000
+
+[collect.sync.update_frequency]
+value = 250
+unit = "Millis"
+
+[[collect.output]]
+type = "parquet"
+# Absolute path — must match the docker-compose volume mount
+# (`./serve/datasets:/data`).
+dir = "/data/gateio/"
+
+[[collect.output]]
+type = "terminal"
+
+# ── Workers ──────────────────────────────────────────────────
+# Gate.io currency pairs are underscored.
+
+[[workers]]
+symbol = "BTC_USDT"
+
+[[workers]]
+symbol = "ETH_USDT"
+
+[[workers]]
+symbol = "SOL_USDT"
