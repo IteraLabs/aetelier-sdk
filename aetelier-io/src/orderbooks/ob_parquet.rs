@@ -398,7 +398,11 @@ pub fn load_parquet_to_ob(path: &Path) -> Result<Vec<Orderbook>, PersistError> {
 
     // Accumulate per-timestamp: (symbol, bid_levels, ask_levels)
     // BTreeMap gives us sorted-by-timestamp iteration for free.
-    let mut groups: BTreeMap<u64, SnapshotOrderbook> = BTreeMap::new();
+    // Keyed on (symbol, ts), not ts alone: a file carrying more than one symbol
+    // has a row per (symbol, level) at every grid stamp, so a ts-only key folds
+    // two different books into one — the second symbol's levels appended to the
+    // first symbol's arrays, under whichever symbol the reader saw first.
+    let mut groups: BTreeMap<(String, u64), SnapshotOrderbook> = BTreeMap::new();
 
     for batch_result in reader {
         let batch = batch_result.map_err(crate::parquet_err::from_arrow)?;
@@ -447,7 +451,7 @@ pub fn load_parquet_to_ob(path: &Path) -> Result<Vec<Orderbook>, PersistError> {
             let loc = local_ts_col.map(|a| a.value(i)).unwrap_or(0);
             let rtt = rtt_col.map(|a| a.value(i)).unwrap_or(0);
 
-            let entry = groups.entry(ts).or_insert_with(|| {
+            let entry = groups.entry((symbol.clone(), ts)).or_insert_with(|| {
                 (symbol, exchange, src, loc, rtt, Vec::new(), Vec::new())
             });
 
@@ -470,7 +474,7 @@ pub fn load_parquet_to_ob(path: &Path) -> Result<Vec<Orderbook>, PersistError> {
             .into_iter()
             .map(
                 |(
-                    ts,
+                    (_key_symbol, ts),
                     (symbol, exchange, src, loc, rtt, mut bid_levels, mut ask_levels),
                 )|
                  -> Result<Orderbook, PersistError> {
