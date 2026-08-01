@@ -19,5 +19,4 @@ updates:
     directory: /
     schedule:
       interval: monthly
-    ignore:
-      - dependency-name: "dtolnay/rust-toolchain"
+    open-pull-requests-limit: 0
