@@ -60,6 +60,10 @@ name = "conformance"
 path = "tests/conformance.rs"
 
 [[test]]
+name = "parity"
+path = "tests/parity.rs"
+
+[[test]]
 name = "test_bybit_orderbook_responses"
 path = "tests/sources/bybit/order_books/test_orderbook_responses.rs"
 
