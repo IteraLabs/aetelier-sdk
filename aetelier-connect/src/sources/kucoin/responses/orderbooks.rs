@@ -2,7 +2,6 @@
 
 use serde::Deserialize;
 
-/// `[price, size, sequence]` — all strings.
 #[derive(Deserialize, Debug, Clone)]
 pub struct KucoinChange(pub String, pub String, pub String);
 
@@ -14,7 +13,6 @@ pub struct KucoinChanges {
     pub bids: Vec<KucoinChange>,
 }
 
-/// `/market/level2` incremental payload (carries a sequence range).
 #[derive(Deserialize, Debug, Clone)]
 pub struct KucoinL2Data {
     #[serde(rename = "sequenceStart")]
@@ -23,4 +21,6 @@ pub struct KucoinL2Data {
     pub sequence_end: u64,
     pub symbol: String,
     pub changes: KucoinChanges,
+    #[serde(default)]
+    pub time: u64,
 }

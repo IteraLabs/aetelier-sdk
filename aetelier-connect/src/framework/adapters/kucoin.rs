@@ -174,10 +174,7 @@ impl Normalizer for KucoinNormalizer {
                     asks: d.changes.asks.iter().map(map).collect(),
                     update_id: d.sequence_end,
                     sequence: d.sequence_start,
-                    // KuCoin's `/market/level2` push carries no per-frame event
-                    // time (only a sequence range), so the runtime stamps emitted
-                    // books with wall-clock instead.
-                    source_orderbook_ts_us: 0,
+                    source_orderbook_ts_us: crate::framework::model::epoch_to_us(d.time),
                     local_orderbook_ts_us: 0,
                     source_orderbook_rtt_us: 0,
                     checksum: None,
@@ -387,6 +384,7 @@ mod tests {
                 asks: vec![KucoinChange("101.0".into(), "0.0".into(), "105".into())],
                 bids: vec![KucoinChange("100.0".into(), "2.0".into(), "104".into())],
             },
+            time: 1_784_133_306_841,
         };
         let evs = KucoinNormalizer::default().normalize(KucoinWssEvent::Level2(d));
         match &evs[0] {
@@ -394,7 +392,36 @@ mod tests {
                 assert_eq!(nd.symbol, "BTC-USDT");
                 assert_eq!(nd.update_id, 105);
                 assert_eq!(nd.sequence, 100);
+                assert_eq!(nd.source_orderbook_ts_us, 1_784_133_306_841_000);
             }
+            other => panic!("expected Book, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn level2_venue_timestamp_survives_a_captured_frame() {
+        let raw = include_str!("../../../datasets/kucoin/btcusdt_book_trade.jsonl");
+        let frame = raw
+            .lines()
+            .find(|l| l.contains("trade.l2update"))
+            .expect("capture contains a level2 frame");
+        let v: serde_json::Value = serde_json::from_str(frame).expect("frame parses");
+        let d: KucoinL2Data =
+            serde_json::from_value(v["data"].clone()).expect("level2 data decodes");
+
+        assert!(
+            d.time > 0,
+            "KuCoin level2 frames carry `time`; got {}",
+            d.time
+        );
+
+        let evs = KucoinNormalizer::default().normalize(KucoinWssEvent::Level2(d));
+        match &evs[0] {
+            DomainEvent::Book(nd) => assert!(
+                nd.source_orderbook_ts_us > 1_600_000_000_000_000,
+                "venue time must reach the delta in us, got {}",
+                nd.source_orderbook_ts_us
+            ),
             other => panic!("expected Book, got {other:?}"),
         }
     }
