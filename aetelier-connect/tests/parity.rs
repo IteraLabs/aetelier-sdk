@@ -211,7 +211,7 @@ const BITSO: VenueParity = VenueParity {
     seeding: Seeding::SelfSeedFirstSnapshot,
     legacy_engine_max_depth: None,
     level_compare: LevelCompare::ExactWireToken,
-    declared_divergences: &[DeltaField::Sequence],
+    declared_divergences: &[],
     trade_fanout: TradeFanout::OnePrintPerFrame,
     min_book_frames: 899,
     min_trades: 11,

@@ -151,7 +151,7 @@ impl Normalizer for BitsoNormalizer {
                     bids: Vec::new(),
                     asks: Vec::new(),
                     update_id,
-                    sequence: 0,
+                    sequence: m.sequence.unwrap_or(0),
                     // `update_id` is the newest per-order `d` timestamp (ms).
                     source_orderbook_ts_us: epoch_to_us(update_id),
                     local_orderbook_ts_us: 0,
