@@ -469,63 +469,61 @@ pub fn load_parquet_to_ob(path: &Path) -> Result<Vec<Orderbook>, PersistError> {
     }
 
     // Convert each group into an Orderbook
-    let orderbooks: Vec<Orderbook> =
-        groups
-            .into_iter()
-            .map(
-                |(
-                    (_key_symbol, ts),
-                    (symbol, exchange, src, loc, rtt, mut bid_levels, mut ask_levels),
-                )|
-                 -> Result<Orderbook, PersistError> {
-                    use aetelier_types::orderbooks::f64_to_decimal;
-                    use aetelier_types::trading_pair::TradingPair;
-                    use std::str::FromStr;
+    let orderbooks: Vec<Orderbook> = groups
+        .into_iter()
+        .map(
+            |(
+                (_key_symbol, ts),
+                (symbol, exchange, src, loc, rtt, mut bid_levels, mut ask_levels),
+            )|
+             -> Result<Orderbook, PersistError> {
+                use aetelier_types::orderbooks::f64_to_decimal;
+                use aetelier_types::trading_pair::TradingPair;
+                use std::str::FromStr;
 
-                    // Levels
-                    bid_levels.sort_by_key(|(l, _, _)| *l);
-                    let bids: Vec<Level> = bid_levels
-                        .into_iter()
-                        .map(|(idx, price, volume)| {
-                            Level::new(
-                                idx as u32,
-                                OrderSide::Bids,
-                                f64_to_decimal(price),
-                                f64_to_decimal(volume),
-                                vec![],
-                            )
-                        })
-                        .collect();
+                // Levels
+                bid_levels.sort_by_key(|(l, _, _)| *l);
+                let bids: Vec<Level> = bid_levels
+                    .into_iter()
+                    .map(|(idx, price, volume)| {
+                        Level::new(
+                            idx as u32,
+                            OrderSide::Bids,
+                            f64_to_decimal(price),
+                            f64_to_decimal(volume),
+                            vec![],
+                        )
+                    })
+                    .collect();
 
-                    ask_levels.sort_by_key(|(l, _, _)| *l);
-                    let asks: Vec<Level> = ask_levels
-                        .into_iter()
-                        .map(|(idx, price, volume)| {
-                            Level::new(
-                                idx as u32,
-                                OrderSide::Asks,
-                                f64_to_decimal(price),
-                                f64_to_decimal(volume),
-                                vec![],
-                            )
-                        })
-                        .collect();
+                ask_levels.sort_by_key(|(l, _, _)| *l);
+                let asks: Vec<Level> = ask_levels
+                    .into_iter()
+                    .map(|(idx, price, volume)| {
+                        Level::new(
+                            idx as u32,
+                            OrderSide::Asks,
+                            f64_to_decimal(price),
+                            f64_to_decimal(volume),
+                            vec![],
+                        )
+                    })
+                    .collect();
 
-                    let pair = TradingPair::from_str(&symbol).map_err(|_| {
-                        PersistError::Parse(format!(
-                            "malformed symbol '{symbol}' in {}",
-                            path.display()
-                        ))
-                    })?;
-                    let mut ob =
-                        Orderbook::from_levels(0, ts, pair, exchange, bids, asks);
-                    ob.source_orderbook_ts_us = src;
-                    ob.local_orderbook_ts_us = loc;
-                    ob.source_orderbook_rtt_us = rtt;
-                    Ok(ob)
-                },
-            )
-            .collect::<Result<Vec<_>, _>>()?;
+                let pair = TradingPair::from_str(&symbol).map_err(|_| {
+                    PersistError::Parse(format!(
+                        "malformed symbol '{symbol}' in {}",
+                        path.display()
+                    ))
+                })?;
+                let mut ob = Orderbook::from_levels(0, ts, pair, exchange, bids, asks);
+                ob.source_orderbook_ts_us = src;
+                ob.local_orderbook_ts_us = loc;
+                ob.source_orderbook_rtt_us = rtt;
+                Ok(ob)
+            },
+        )
+        .collect::<Result<Vec<_>, _>>()?;
 
     Ok(orderbooks)
 }
