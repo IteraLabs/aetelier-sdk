@@ -695,5 +695,5 @@ pub fn decimal_to_f64(d: Decimal) -> f64 {
 /// (e.g. from random generation or exchange responses that provide f64).
 #[inline]
 pub fn f64_to_decimal(v: f64) -> Decimal {
-    Decimal::from_f64_retain(v).unwrap_or(Decimal::ZERO)
+    Decimal::from_f64(v).unwrap_or(Decimal::ZERO)
 }

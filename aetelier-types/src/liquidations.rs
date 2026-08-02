@@ -174,8 +174,7 @@ impl LiquidationBuilder {
             liquidation_ts_us,
             pair,
             side,
-            // Builder accepts f64 for call-site convenience; exact decimal
-            // retained here via `from_f64_retain`.
+            // Builder accepts f64 for call-site convenience.
             amount: f64_to_decimal(amount),
             price: f64_to_decimal(price),
             exchange,

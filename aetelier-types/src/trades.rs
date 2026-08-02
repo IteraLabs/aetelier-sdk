@@ -323,8 +323,7 @@ impl TradeBuilder {
             pair,
             side,
             // The builder accepts f64 for call-site convenience (venue
-            // normalizers parse wire values as f64); the exact decimal is
-            // retained here via `from_f64_retain`.
+            // normalizers parse wire values as f64).
             amount: f64_to_decimal(amount),
             price: f64_to_decimal(price),
             exchange,
