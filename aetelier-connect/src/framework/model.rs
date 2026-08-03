@@ -44,7 +44,7 @@ impl DomainEvent {
                 trade.local_trade_ts_us = local_us;
                 trade.source_trade_rtt_us = rtt_us;
             }
-            // A control signal carries no venue timestamps.
+
             DomainEvent::ConnectionGap { .. } => {}
         }
     }
@@ -74,16 +74,12 @@ pub trait Normalizer: Send + Sync + 'static {
 pub(crate) fn epoch_to_us(v: u64) -> u64 {
     match v {
         0 => 0,
-        v if v >= 100_000_000_000_000_000 => v / 1_000, // ns  → µs
-        v if v >= 100_000_000_000_000 => v,             // µs  (as-is)
-        v if v >= 100_000_000_000 => v * 1_000,         // ms  → µs
-        v => v * 1_000_000,                             // s   → µs
+        v if v >= 100_000_000_000_000_000 => v / 1_000,
+        v if v >= 100_000_000_000_000 => v,
+        v if v >= 100_000_000_000 => v * 1_000,
+        v => v * 1_000_000,
     }
 }
-
-// ─────────────────────────────────────────────────────────────────────────
-// Book FSM state and the reconstruction-model enum
-// ─────────────────────────────────────────────────────────────────────────
 
 /// OrderBook FSM state: `Empty → Synced ⇄ Gapped → Closed`. A gap is a
 /// recoverable state: the book is invalid until a re-seed reconciles it.
@@ -156,6 +152,22 @@ impl ReconstructionModel {
 
     /// Whether reconstruction requires a REST seed — derived from
     /// [`snapshot_source`](Self::snapshot_source), never declared separately.
+    pub fn class_label(&self) -> &'static str {
+        match self {
+            ReconstructionModel::FullRefresh => "full_refresh",
+            ReconstructionModel::SeqDelta { .. } => "seq_delta",
+            ReconstructionModel::ChecksumDelta { .. } => "checksum_delta",
+            ReconstructionModel::L3 { .. } => "l3",
+        }
+    }
+
+    pub fn book_level(&self) -> &'static str {
+        match self {
+            ReconstructionModel::L3 { .. } => "L3",
+            _ => "L2",
+        }
+    }
+
     pub fn needs_rest(&self) -> bool {
         self.snapshot_source() == Some(SnapshotSource::RestSnapshot)
     }
@@ -234,6 +246,8 @@ pub enum ChecksumFmt {
 /// Why a book lost continuity. Structured so the runtime can count checksum
 /// failures distinctly (a corrupted book) from sequence/refresh gaps without
 /// matching on message strings.
+const L3_MAX_ORDERS: usize = 200_000;
+
 #[derive(Debug, Clone)]
 pub enum ResyncReason {
     /// CRC32 book checksum mismatched after applying a delta.
@@ -285,10 +299,6 @@ pub enum BookOutput {
     Snapshot,
 }
 
-// ─────────────────────────────────────────────────────────────────────────
-// SourcedOrderbook
-// ─────────────────────────────────────────────────────────────────────────
-
 /// Reconstructs a live order book from a feed's normalized deltas. The
 /// source-agnostic `apply` is selected by the `ReconstructionModel`.
 /// States: `Empty → Synced ⇄ Gapped → Closed`.
@@ -320,8 +330,6 @@ impl SourcedOrderbook {
         model: ReconstructionModel,
         recovery: RecoveryAction,
     ) -> Self {
-        // Kraken's checksum is over exactly the subscribed depth, so the book
-        // must be held there; other models keep the full book.
         let book = match &model {
             ReconstructionModel::ChecksumDelta {
                 fmt: ChecksumFmt::KrakenTop10,
@@ -366,18 +374,25 @@ impl SourcedOrderbook {
     /// The source-agnostic apply. Either advances `Synced` or transitions to
     /// `Gapped` and raises `ResyncNeeded` — never silently drops.
     pub fn apply(&mut self, delta: NormalizedDelta) -> Result<BookOutput, ResyncNeeded> {
-        match self.model.clone() {
+        let output = match self.model.clone() {
             ReconstructionModel::FullRefresh => self.apply_full_refresh(delta),
             ReconstructionModel::SeqDelta { predicate, .. } => {
                 self.apply_seq_delta(delta, predicate)
             }
-            // ChecksumDelta verifies the venue checksum after applying; L3
-            // maintains an order-id map and aggregates it to price levels.
             ReconstructionModel::ChecksumDelta { fmt } => {
                 self.apply_checksummed(delta, fmt)
             }
             ReconstructionModel::L3 { .. } => self.apply_l3(delta),
+        }?;
+        if let (Some((bid, _)), Some((ask, _))) =
+            (self.book.best_bid(), self.book.best_ask())
+            && bid >= ask
+        {
+            return Err(self.gap(format!(
+                "book crossed after apply: best_bid {bid} >= best_ask {ask}"
+            )));
         }
+        Ok(output)
     }
 
     /// Apply an L3 (per-order) snapshot or delta. Maintains an order-id map and
@@ -391,7 +406,7 @@ impl SourcedOrderbook {
             self.l3_orders.clear();
             self.l3_levels.clear();
         }
-        // (is_ask, price) levels whose aggregate changed this delta.
+
         let mut touched: Vec<(bool, Decimal)> = Vec::new();
         let mut touch = |key: (bool, Decimal)| {
             if !touched.contains(&key) {
@@ -399,9 +414,6 @@ impl SourcedOrderbook {
             }
         };
         for o in &delta.orders {
-            // Remove any prior position for this order id from its old level
-            // first — a removal carries no price (the old level is looked up by
-            // order id), so this must not depend on parsing `o.price`.
             if let Some(old) = self.l3_orders.remove(&o.order_id) {
                 let key = (old.is_ask, old.price);
                 if let Some(total) = self.l3_levels.get_mut(&key) {
@@ -415,11 +427,17 @@ impl SourcedOrderbook {
             if o.removed {
                 continue;
             }
-            // An open/updated order needs a parseable price and positive size.
+
             let (Ok(price), Ok(size)) = (
                 Decimal::from_str_exact(&o.price),
                 Decimal::from_str_exact(&o.size),
             ) else {
+                tracing::warn!(
+                    order_id = %o.order_id,
+                    price = %o.price,
+                    size = %o.size,
+                    "l3: unparseable open order skipped after prior position removal"
+                );
                 continue;
             };
             if size <= Decimal::ZERO {
@@ -437,7 +455,12 @@ impl SourcedOrderbook {
             );
             touch(key);
         }
-        // Project the touched levels onto L2 (`size 0` removes the level).
+        if self.l3_orders.len() > L3_MAX_ORDERS {
+            return Err(self.gap(format!(
+                "l3 order map exceeded {L3_MAX_ORDERS} entries; re-seeding"
+            )));
+        }
+
         let mut bids = Vec::new();
         let mut asks = Vec::new();
         for key in &touched {
@@ -497,11 +520,7 @@ impl SourcedOrderbook {
                     ))));
                 }
             }
-            // A checksum-delta venue's ONLY continuity guarantee is the
-            // checksum. A delta frame without one cannot be validated, so
-            // fail closed (gap + reseed) rather than sync an unvalidated
-            // book. A snapshot frame is authoritative — it needs no
-            // continuity check, so absence there is accepted.
+
             None if !snapshot => {
                 return Err(self.gap(ResyncReason::Checksum(
                     "checksum absent on a checksum-model delta frame".into(),
@@ -521,7 +540,7 @@ impl SourcedOrderbook {
         &mut self,
         mut delta: NormalizedDelta,
     ) -> Result<BookOutput, ResyncNeeded> {
-        delta.is_snapshot = true; // every frame is a complete book
+        delta.is_snapshot = true;
         self.book
             .process(&delta)
             .map_err(|e| self.gap(e.to_string()))?;
@@ -547,13 +566,11 @@ impl SourcedOrderbook {
             None => return Err(self.gap("delta received before snapshot")),
             Some(last) => {
                 let continuous = match predicate {
-                    // first_id <= last+1 <= final_id: abuts (or overlaps) the
-                    // last applied id with no dropped frames.
                     SeqPredicate::RangeInclusive => {
                         delta.sequence <= last + 1 && delta.update_id > last
                     }
                     SeqPredicate::ExactPrev => delta.sequence == last,
-                    // Connection-wide counter: only require strict advance.
+
                     SeqPredicate::Monotonic => delta.update_id > last,
                 };
                 if !continuous {
@@ -597,10 +614,6 @@ impl SourcedOrderbook {
         self.l3_levels.clear();
     }
 }
-
-// ─────────────────────────────────────────────────────────────────────────
-// SourcedTradebook
-// ─────────────────────────────────────────────────────────────────────────
 
 /// Reconstructs an ordered, de-duplicated public-trade log. Where the venue
 /// provides a monotonic trade sequence, continuity breaks are counted as
@@ -673,7 +686,6 @@ impl SourcedTradebook {
         let mut outcome = TradeApply::Applied;
         if let (Some(seq), Some(last)) = (sequence, self.last_seq) {
             if seq <= last {
-                // Duplicate / out-of-order — dedup, not a gap.
                 return TradeApply::Duplicate;
             }
             if seq > last + 1 {
@@ -688,7 +700,7 @@ impl SourcedTradebook {
         }
         self.count += 1;
         self.state = TradeBookState::Synced;
-        let _ = trade; // the print is forwarded to Emit by the caller
+        let _ = trade;
         outcome
     }
 }
@@ -696,6 +708,7 @@ impl SourcedTradebook {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use aetelier_types::orderbooks::L3Order;
 
     #[test]
     fn seeding_taxonomy_derives_from_snapshot_source() {
@@ -745,6 +758,99 @@ mod tests {
     }
 
     #[test]
+    fn crossed_book_after_apply_raises_resync_for_every_class() {
+        let model = ReconstructionModel::FullRefresh;
+        let mut book = SourcedOrderbook::new(
+            TradingPair::new("BTC", "USD"),
+            model.clone(),
+            model.recovery_action(),
+        );
+        let crossed = delta("BTCUSD", vec![("101", "1")], vec![("100", "1")], 1, 1, true);
+        let out = book.apply(crossed);
+        assert!(out.is_err(), "a crossed book must never be emitted");
+        assert_eq!(book.state(), OrderBookState::Gapped);
+        let sane = delta("BTCUSD", vec![("99", "1")], vec![("100", "1")], 2, 2, true);
+        assert!(
+            book.apply(sane).is_ok(),
+            "a sane snapshot recovers the book"
+        );
+        assert_eq!(book.state(), OrderBookState::Synced);
+    }
+
+    #[test]
+    fn l3_stale_top_bid_is_self_healed_not_emitted() {
+        let model = ReconstructionModel::L3 {
+            source: SnapshotSource::RestSnapshot,
+        };
+        let mut book = SourcedOrderbook::new(
+            TradingPair::new("BTC", "MXN"),
+            model.clone(),
+            model.recovery_action(),
+        );
+        let mut seed = delta("btc_mxn", vec![], vec![], 1, 1, true);
+        seed.orders = vec![
+            L3Order {
+                order_id: "b1".into(),
+                is_ask: false,
+                price: "1105860".into(),
+                size: "1".into(),
+                removed: false,
+            },
+            L3Order {
+                order_id: "a1".into(),
+                is_ask: true,
+                price: "1106000".into(),
+                size: "1".into(),
+                removed: false,
+            },
+        ];
+        assert!(book.apply(seed).is_ok());
+        let mut cross = delta("btc_mxn", vec![], vec![], 2, 2, false);
+        cross.orders = vec![L3Order {
+            order_id: "a2".into(),
+            is_ask: true,
+            price: "1105290".into(),
+            size: "1".into(),
+            removed: false,
+        }];
+        let out = book.apply(cross);
+        assert!(
+            out.is_err(),
+            "an ask arriving under a stale bid must trigger resync, not emit crossed"
+        );
+        assert_eq!(book.state(), OrderBookState::Gapped);
+    }
+
+    #[test]
+    fn reconstruction_classes_carry_stable_labels() {
+        assert_eq!(
+            ReconstructionModel::FullRefresh.class_label(),
+            "full_refresh"
+        );
+        assert_eq!(
+            ReconstructionModel::SeqDelta {
+                predicate: SeqPredicate::Monotonic,
+                source: SnapshotSource::WssSelfSeed,
+            }
+            .class_label(),
+            "seq_delta"
+        );
+        assert_eq!(
+            ReconstructionModel::ChecksumDelta {
+                fmt: ChecksumFmt::KrakenTop10
+            }
+            .class_label(),
+            "checksum_delta"
+        );
+        let l3 = ReconstructionModel::L3 {
+            source: SnapshotSource::RestSnapshot,
+        };
+        assert_eq!(l3.class_label(), "l3");
+        assert_eq!(l3.book_level(), "L3");
+        assert_eq!(ReconstructionModel::FullRefresh.book_level(), "L2");
+    }
+
+    #[test]
     fn checksum_reason_is_structurally_distinguishable() {
         let c = ResyncReason::Checksum("computed=1 expected=2".into());
         assert!(c.is_checksum());
@@ -785,7 +891,6 @@ mod tests {
 
     #[test]
     fn config_depth_arms_non_checksum_books_but_spares_checksum_venues() {
-        // Non-checksum model: the config depth prunes the reconstructed book.
         let seq = ReconstructionModel::SeqDelta {
             predicate: SeqPredicate::Monotonic,
             source: SnapshotSource::WssSelfSeed,
@@ -803,8 +908,6 @@ mod tests {
             "config depth prunes a non-checksum book"
         );
 
-        // Kraken hashes exactly the subscribed depth: `new` pins it to 10 and
-        // the config depth must never override it.
         let kraken = ReconstructionModel::ChecksumDelta {
             fmt: ChecksumFmt::KrakenTop10,
         };
@@ -821,8 +924,6 @@ mod tests {
             "checksum venue keeps its recipe depth"
         );
 
-        // OKX hashes the top-25 of a full book: `new` leaves it unpruned and
-        // the config depth must not clamp it.
         let okx = ReconstructionModel::ChecksumDelta {
             fmt: ChecksumFmt::OkxTop25,
         };
@@ -842,9 +943,6 @@ mod tests {
 
     #[test]
     fn force_gap_marks_gapped_and_releases_levels_eagerly() {
-        // Connection-level loss (DomainEvent::ConnectionGap) gaps a book from
-        // OUTSIDE the apply path; the levels must be released immediately so
-        // nothing large is held across the reconnect that follows.
         let model = ReconstructionModel::SeqDelta {
             predicate: SeqPredicate::Monotonic,
             source: SnapshotSource::WssSelfSeed,
@@ -871,8 +969,6 @@ mod tests {
         assert_eq!(book.book().bid_depth(), 0, "bids released eagerly");
         assert_eq!(book.book().ask_depth(), 0, "asks released eagerly");
 
-        // A later delta is rejected until a fresh seed arrives — the gap is
-        // not silently absorbed.
         let err = book.apply(delta(
             "BTC/USD",
             vec![("100", "1")],
@@ -886,7 +982,7 @@ mod tests {
 
     #[test]
     fn epoch_to_us_normalizes_any_unit_to_us() {
-        let us = 1_700_000_000_000_000u64; // a 2023-era microsecond epoch
+        let us = 1_700_000_000_000_000u64;
         assert_eq!(epoch_to_us(us), us, "us passes through");
         assert_eq!(epoch_to_us(1_700_000_000), us, "seconds → us");
         assert_eq!(epoch_to_us(1_700_000_000_000), us, "milliseconds → us");
@@ -920,7 +1016,7 @@ mod tests {
             },
             RecoveryAction::Resubscribe,
         );
-        // Snapshot without a checksum is authoritative — accepted.
+
         b.apply(checksummed(
             "BTCUSDT",
             vec![("100", "1")],
@@ -932,7 +1028,6 @@ mod tests {
         .unwrap();
         assert_eq!(b.state(), OrderBookState::Synced);
 
-        // A DELTA without a checksum cannot be validated — fail closed.
         let err = b
             .apply(checksummed(
                 "BTCUSDT",
@@ -1005,7 +1100,7 @@ mod tests {
                 .unwrap(),
             BookOutput::Applied
         );
-        // Stale delta -> Gapped + ResyncNeeded.
+
         assert!(
             b.apply(delta("BTCUSDT", vec![("100", "3")], vec![], 11, 0, false))
                 .is_err()
@@ -1023,7 +1118,7 @@ mod tests {
             },
             RecoveryAction::RestSnapshot,
         );
-        // Snapshot: final id 100.
+
         b.apply(delta(
             "BTCUSDT",
             vec![("100", "1")],
@@ -1033,7 +1128,7 @@ mod tests {
             true,
         ))
         .unwrap();
-        // Contiguous: first_id 101 == last+1, final_id 105.
+
         b.apply(delta(
             "BTCUSDT",
             vec![("100", "2")],
@@ -1044,7 +1139,7 @@ mod tests {
         ))
         .unwrap();
         assert_eq!(b.state(), OrderBookState::Synced);
-        // Dropped frame: first_id 110 > last+1 (106) → gap (the live-found bug).
+
         assert!(
             b.apply(delta(
                 "BTCUSDT",
@@ -1069,7 +1164,7 @@ mod tests {
             },
             RecoveryAction::ReqOnSocket,
         );
-        // REQ snapshot at seqNum=100.
+
         b.apply(delta(
             "BTCUSDT",
             vec![("100", "1")],
@@ -1079,7 +1174,7 @@ mod tests {
             true,
         ))
         .unwrap();
-        // Update seqNum=101 whose prevSeqNum(sequence)=100 == last → continuous.
+
         b.apply(delta(
             "BTCUSDT",
             vec![("100", "2")],
@@ -1090,7 +1185,7 @@ mod tests {
         ))
         .unwrap();
         assert_eq!(b.state(), OrderBookState::Synced);
-        // Update with prevSeqNum=102 != last(101) → gap.
+
         assert!(
             b.apply(delta(
                 "BTCUSDT",
@@ -1115,7 +1210,7 @@ mod tests {
             },
             RecoveryAction::Resubscribe,
         );
-        // Self-seed snapshot at connection seq 1.
+
         b.apply(delta(
             "BTCUSD",
             vec![("100", "1")],
@@ -1125,12 +1220,11 @@ mod tests {
             true,
         ))
         .unwrap();
-        // Connection seq jumps 1 -> 6 (trades/other messages consumed 2..5).
-        // RangeInclusive would gap here; Monotonic must apply.
+
         b.apply(delta("BTCUSD", vec![("100", "2")], vec![], 6, 6, false))
             .unwrap();
         assert_eq!(b.state(), OrderBookState::Synced);
-        // Non-advancing id (duplicate/out-of-order) -> Gapped.
+
         assert!(
             b.apply(delta("BTCUSD", vec![("100", "3")], vec![], 6, 6, false))
                 .is_err()
@@ -1171,8 +1265,7 @@ mod tests {
             },
             RecoveryAction::RestSnapshot,
         );
-        // Snapshot: two bids at the SAME price (1.0 + 2.0 must aggregate to 3.0,
-        // not overwrite to 2.0) plus an ask.
+
         b.apply(l3_delta(
             1,
             true,
@@ -1188,11 +1281,11 @@ mod tests {
             b.book().asks.get(&"1010000".parse().unwrap()),
             Some(&"0.5".parse().unwrap())
         );
-        // Cancel o1 (no price on the cancel) → level drops to o2's 2.0.
+
         b.apply(l3_delta(2, false, vec![l3("o1", false, "", "", true)]))
             .unwrap();
         assert_eq!(b.book().bids.get(&price), Some(&"2.0".parse().unwrap()));
-        // A new order at the same price re-aggregates (2.0 + 0.5 = 2.5).
+
         b.apply(l3_delta(
             3,
             false,
@@ -1200,7 +1293,7 @@ mod tests {
         ))
         .unwrap();
         assert_eq!(b.book().bids.get(&price), Some(&"2.5".parse().unwrap()));
-        // Cancel the remaining orders → the level disappears entirely.
+
         b.apply(l3_delta(
             4,
             false,
@@ -1213,8 +1306,6 @@ mod tests {
 
     #[test]
     fn stamp_local_sets_only_the_matching_variant_fields() {
-        // Book event: stamp_local must set the order-book local ts + rtt and
-        // leave everything else (incl. the preserved source_orderbook_ts_us) alone.
         let mut book = DomainEvent::Book(delta(
             "BTCUSDT",
             vec![("100", "1")],
@@ -1228,14 +1319,12 @@ mod tests {
             DomainEvent::Book(d) => {
                 assert_eq!(d.local_orderbook_ts_us, 1_234_567_890);
                 assert_eq!(d.source_orderbook_rtt_us, 250);
-                // The exchange ts is preserved, not clobbered by stamping.
+
                 assert_eq!(d.source_orderbook_ts_us, 0);
             }
             other => panic!("expected Book variant, got {other:?}"),
         }
 
-        // Trade event: stamp_local must set the trade local ts + rtt and leave
-        // the preserved source_trade_ts_us untouched.
         let mut tr = Trade::random();
         tr.source_trade_ts_us = 1_700_000_000_000;
         tr.local_trade_ts_us = 0;
@@ -1249,7 +1338,7 @@ mod tests {
             DomainEvent::Trade { trade, sequence } => {
                 assert_eq!(trade.local_trade_ts_us, 9_876_543_210);
                 assert_eq!(trade.source_trade_rtt_us, 333);
-                // The exchange ts is preserved, not clobbered by stamping.
+
                 assert_eq!(trade.source_trade_ts_us, 1_700_000_000_000);
                 assert_eq!(*sequence, Some(42));
             }

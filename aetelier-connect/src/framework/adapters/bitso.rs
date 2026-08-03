@@ -33,10 +33,6 @@ const BITSO_WSS_URL: &str = "wss://ws.bitso.com";
 /// Wire symbol codec — lowercase `btc_mxn`.
 const BITSO_CODEC: SymbolCodec = SymbolCodec::Underscore { upper: false };
 
-// ─────────────────────────────────────────────────────────────────────────
-// ProtocolHooks
-// ─────────────────────────────────────────────────────────────────────────
-
 pub struct BitsoHooks;
 
 impl ProtocolHooks for BitsoHooks {
@@ -63,13 +59,9 @@ impl ProtocolHooks for BitsoHooks {
     }
 
     fn heartbeat(&self) -> Heartbeat {
-        Heartbeat::None // Bitso sends `{"type":"ka"}`; no client action needed.
+        Heartbeat::None
     }
 }
-
-// ─────────────────────────────────────────────────────────────────────────
-// Normalizer
-// ─────────────────────────────────────────────────────────────────────────
 
 /// Maps a decoded `BitsoWssEvent` to `DomainEvent`s. Holds the worker's
 /// shared [`SourceMetrics`] so every dropped event is counted, not just
@@ -116,9 +108,7 @@ impl Normalizer for BitsoNormalizer {
         match event {
             BitsoWssEvent::DiffOrders(m) => {
                 let mut evs = Vec::with_capacity(2);
-                // Sentinel first: a hole before this frame means the book is
-                // already stale — the resync must precede consuming anything
-                // newer. The dropped count is EXACT (dense per-book counter).
+
                 if let Some(seq) = m.sequence
                     && let Some(dropped) = self.observe_seq(&m.book, seq)
                 {
@@ -129,15 +119,24 @@ impl Normalizer for BitsoNormalizer {
                     );
                     evs.push(DomainEvent::ConnectionGap { dropped });
                 }
-                // Project each per-order change to an `L3Order`; the engine keeps
-                // the order-id map and aggregates to price levels. A
-                // cancelled/completed order is `removed` (no price needed); an
-                // open order carries its price + amount.
+
                 let mut orders = Vec::with_capacity(m.payload.len());
                 let mut update_id = 0u64;
                 for o in &m.payload {
                     update_id = update_id.max(o.d);
                     let removed = matches!(o.s.as_str(), "cancelled" | "completed");
+                    if !removed
+                        && !matches!(
+                            o.s.as_str(),
+                            "open" | "partially filled" | "partial-fill" | "queued"
+                        )
+                    {
+                        tracing::warn!(
+                            status = %o.s,
+                            order_id = %o.o,
+                            "bitso: unmapped diff-order status treated as open"
+                        );
+                    }
                     orders.push(L3Order {
                         order_id: o.o.clone(),
                         is_ask: o.t != 0,
@@ -152,7 +151,7 @@ impl Normalizer for BitsoNormalizer {
                     asks: Vec::new(),
                     update_id,
                     sequence: m.sequence.unwrap_or(0),
-                    // `update_id` is the newest per-order `d` timestamp (ms).
+
                     source_orderbook_ts_us: epoch_to_us(update_id),
                     local_orderbook_ts_us: 0,
                     source_orderbook_rtt_us: 0,
@@ -200,13 +199,7 @@ impl Normalizer for BitsoNormalizer {
                                 id: t.i.to_string(),
                                 origin: Default::default(),
                             },
-                            // NOT armable (cycle #7 density check on live
-                            // data): `i` is a GLOBAL cross-market trade
-                            // counter — btc_mxn prints arrived 46 ids apart
-                            // while other books traded in between — so
-                            // per-book density is structurally impossible and
-                            // arming would count every other market's trades
-                            // as "lost". Best-effort.
+
                             sequence: None,
                         })
                     })
@@ -215,10 +208,6 @@ impl Normalizer for BitsoNormalizer {
         }
     }
 }
-
-// ─────────────────────────────────────────────────────────────────────────
-// ExchangeAdapter
-// ─────────────────────────────────────────────────────────────────────────
 
 static BITSO_PROFILE: ExchangeProfile = ExchangeProfile {
     id: "bitso",
@@ -255,7 +244,6 @@ impl ExchangeAdapter for BitsoAdapter {
     }
 
     fn book_model(&self, _channel: &str) -> ReconstructionModel {
-        // diff-orders is per-order (L3), seeded by a REST L3 snapshot.
         ReconstructionModel::L3 {
             source: SnapshotSource::RestSnapshot,
         }
@@ -309,10 +297,6 @@ impl ExchangeAdapter for BitsoAdapter {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────
-// REST L3 seeder
-// ─────────────────────────────────────────────────────────────────────────
-
 pub use crate::sources::bitso::rest::BitsoRestSnapshot;
 
 #[cfg(test)]
@@ -354,13 +338,13 @@ mod tests {
                 assert_eq!(nd.update_id, 101);
                 assert!(nd.bids.is_empty() && nd.asks.is_empty());
                 assert_eq!(nd.orders.len(), 2);
-                // open bid order o1.
+
                 assert_eq!(nd.orders[0].order_id, "o1");
                 assert!(!nd.orders[0].is_ask);
                 assert_eq!(nd.orders[0].price, "1000000");
                 assert_eq!(nd.orders[0].size, "0.5");
                 assert!(!nd.orders[0].removed);
-                // cancelled ask order o2 (no price/size needed).
+
                 assert_eq!(nd.orders[1].order_id, "o2");
                 assert!(nd.orders[1].is_ask);
                 assert!(nd.orders[1].removed);
@@ -389,8 +373,7 @@ mod tests {
                 assert_eq!(trade.side, TradeSide::Sell);
                 assert_eq!(trade.pair.base(), "BTC");
                 assert_eq!(trade.pair.quote(), "MXN");
-                // The `x` timestamp (ms) is scaled to the platform µs standard;
-                // a regression to the wrong wire field would zero this.
+
                 assert_eq!(trade.source_trade_ts_us, 1_700_000_000_000_000);
             }
             other => panic!("expected Trade, got {other:?}"),
@@ -412,10 +395,9 @@ mod tests {
 
     #[test]
     fn decoder_skips_subscription_ack_without_payload() {
-        // ack carries type but no payload array.
         let ack = r#"{"action":"subscribe","response":"ok","type":"diff-orders","book":"btc_mxn"}"#;
         assert!(BitsoDecoder::decode(ack).unwrap().is_none());
-        // keep-alive.
+
         assert!(BitsoDecoder::decode(r#"{"type":"ka"}"#).unwrap().is_none());
     }
 
@@ -435,8 +417,6 @@ mod tests {
         ));
     }
 
-    // ── Envelope-sequence sentinel (per-book, dense) ──────────────────────
-
     fn diff_frame(book: &str, seq: u64) -> String {
         format!(
             r#"{{"type":"diff-orders","book":"{book}","sequence":{seq},"payload":[{{"d":100,"r":"1000000","a":"0.1","t":0,"o":"oid-{seq}","s":"open"}}]}}"#
@@ -453,14 +433,13 @@ mod tests {
     #[test]
     fn sequence_sentinel_silent_on_contiguous_and_fires_exactly_on_a_hole() {
         let n = BitsoNormalizer::default();
-        // First frame seeds without a check; contiguous run stays silent.
+
         for seq in 10..15u64 {
             let evs = events_for(&n, &diff_frame("btc_mxn", seq));
             assert_eq!(evs.len(), 1, "book delta only at seq {seq}");
             assert!(matches!(evs[0], DomainEvent::Book(_)));
         }
-        // Slots 15,16 vanish: the gap event precedes the frame's own delta,
-        // with the EXACT dropped count (dense per-book stream).
+
         let evs = events_for(&n, &diff_frame("btc_mxn", 17));
         assert_eq!(evs.len(), 2);
         match &evs[0] {
@@ -468,8 +447,7 @@ mod tests {
             other => panic!("expected ConnectionGap first, got {other:?}"),
         }
         assert!(matches!(evs[1], DomainEvent::Book(_)));
-        // The tracker re-seeds at the observed position: the next contiguous
-        // frame is clean again (one-shot confirmation).
+
         let evs = events_for(&n, &diff_frame("btc_mxn", 18));
         assert_eq!(evs.len(), 1);
     }
@@ -479,7 +457,7 @@ mod tests {
         let n = BitsoNormalizer::default();
         assert_eq!(events_for(&n, &diff_frame("btc_mxn", 100)).len(), 1);
         assert_eq!(events_for(&n, &diff_frame("eth_mxn", 500)).len(), 1);
-        // btc jumps while eth stays contiguous — only btc fires.
+
         let evs = events_for(&n, &diff_frame("btc_mxn", 102));
         assert!(matches!(evs[0], DomainEvent::ConnectionGap { dropped: 1 }));
         assert_eq!(events_for(&n, &diff_frame("eth_mxn", 501)).len(), 1);
@@ -521,8 +499,7 @@ mod tests {
             0,
             "a clean live capture must never confirm a gap"
         );
-        // Find a mid-stream diff-orders frame to drop (skipping a trades/ka
-        // frame would not — and must not — trip the book sentinel).
+
         let mid_diff = frames
             .iter()
             .enumerate()
