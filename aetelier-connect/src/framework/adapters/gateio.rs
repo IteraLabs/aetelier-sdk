@@ -33,6 +33,7 @@ use crate::framework::driver::{DEFAULT_RAW_BUFFER, drive};
 use crate::framework::model::{
     DomainEvent, Normalizer, ReconstructionModel, epoch_to_us,
 };
+use crate::framework::protocol::DeclaredSet;
 use crate::framework::protocol::{Heartbeat, ProtocolHooks};
 use crate::framework::registry::{ExchangeAdapter, ExchangeProfile, TaskExit};
 use crate::framework::symbol::SymbolCodec;
@@ -85,7 +86,11 @@ impl ProtocolHooks for GateioHooks {
     /// One subscribe frame **per `(symbol × channel)` topic** — Gate.io does not
     /// fan out within a single frame. `symbols` are venue wire symbols
     /// (`"BTC_USDT"`, Underscore codec). The envelope `time` is a live stamp.
-    fn subscribe_frames(&self, symbols: &[String]) -> Vec<Message> {
+    fn subscribe_frames(
+        &self,
+        symbols: &[String],
+        _declared: &DeclaredSet,
+    ) -> Vec<Message> {
         let mut frames = Vec::with_capacity(symbols.len() * 2);
         for s in symbols {
             let t = unix_secs();
@@ -263,6 +268,7 @@ impl ExchangeAdapter for GateioAdapter {
     fn spawn(
         &self,
         symbols: Vec<String>,
+        declared: DeclaredSet,
         tx: mpsc::Sender<DomainEvent>,
         shutdown: watch::Receiver<bool>,
         metrics: SourceMetrics,
@@ -270,6 +276,7 @@ impl ExchangeAdapter for GateioAdapter {
         tokio::spawn(drive::<GateioHooks, GateioDecoder, GateioNormalizer>(
             Arc::new(GateioHooks),
             symbols,
+            declared,
             GateioNormalizer {
                 metrics: metrics.clone(),
             },
@@ -371,7 +378,8 @@ mod tests {
 
     #[test]
     fn subscribe_frames_are_one_per_channel() {
-        let frames = GateioHooks.subscribe_frames(&["BTC_USDT".to_string()]);
+        let frames =
+            GateioHooks.subscribe_frames(&["BTC_USDT".to_string()], &DeclaredSet::all());
         assert_eq!(frames.len(), 2);
         let Message::Text(book) = &frames[0] else {
             panic!("expected a text frame");

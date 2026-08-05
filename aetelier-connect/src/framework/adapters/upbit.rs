@@ -25,6 +25,7 @@ use crate::framework::driver::{DEFAULT_RAW_BUFFER, drive};
 use crate::framework::model::{
     DomainEvent, Normalizer, ReconstructionModel, epoch_to_us,
 };
+use crate::framework::protocol::DeclaredSet;
 use crate::framework::protocol::{Heartbeat, ProtocolHooks};
 use crate::framework::registry::{ExchangeAdapter, ExchangeProfile, TaskExit};
 use crate::framework::symbol::SymbolCodec;
@@ -54,7 +55,11 @@ impl ProtocolHooks for UpbitHooks {
 
     /// A single top-level JSON **array**: a ticket, one `orderbook` type entry
     /// and one `trade` type entry (each carrying every code), then the format.
-    fn subscribe_frames(&self, symbols: &[String]) -> Vec<Message> {
+    fn subscribe_frames(
+        &self,
+        symbols: &[String],
+        _declared: &DeclaredSet,
+    ) -> Vec<Message> {
         let codes: Vec<&String> = symbols.iter().collect();
         let frame = serde_json::json!([
             { "ticket": "aetelier-ingest" },
@@ -204,6 +209,7 @@ impl ExchangeAdapter for UpbitAdapter {
     fn spawn(
         &self,
         symbols: Vec<String>,
+        declared: DeclaredSet,
         tx: mpsc::Sender<DomainEvent>,
         shutdown: watch::Receiver<bool>,
         metrics: SourceMetrics,
@@ -211,6 +217,7 @@ impl ExchangeAdapter for UpbitAdapter {
         tokio::spawn(drive::<UpbitHooks, UpbitDecoder, UpbitNormalizer>(
             Arc::new(UpbitHooks),
             symbols,
+            declared,
             UpbitNormalizer {
                 metrics: metrics.clone(),
             },
@@ -299,7 +306,8 @@ mod tests {
 
     #[test]
     fn subscribe_frame_is_a_json_array() {
-        let frames = UpbitHooks.subscribe_frames(&["KRW-BTC".to_string()]);
+        let frames =
+            UpbitHooks.subscribe_frames(&["KRW-BTC".to_string()], &DeclaredSet::all());
         assert_eq!(frames.len(), 1);
         let Message::Text(body) = &frames[0] else {
             panic!("expected a text frame");

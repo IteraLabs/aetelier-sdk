@@ -105,6 +105,34 @@ fn seeding_taxonomy(desc: &VenueConformance) -> Outcome {
             "REST-seeded model but adapter provides no rest_seeder".into(),
         );
     }
+    let expect_out_of_band = matches!(
+        model.snapshot_source(),
+        Some(aetelier_connect::framework::model::SnapshotSource::RestSnapshot)
+            | Some(aetelier_connect::framework::model::SnapshotSource::ReqOnSocket)
+    );
+    if model.seeds_out_of_band() != expect_out_of_band {
+        return Outcome::Fail(format!(
+            "seeds_out_of_band: source {:?} implies {}, model derives {}",
+            model.snapshot_source(),
+            expect_out_of_band,
+            model.seeds_out_of_band()
+        ));
+    }
+    if model.supports_in_band_reseed() && !model.seeds_out_of_band() {
+        return Outcome::Fail(
+            "in-band reseed declared on a model whose seed is not out-of-band".into(),
+        );
+    }
+    if model.seq_is_connection_scoped() && model.replay_dedup_sound() {
+        return Outcome::Fail(
+            "connection-scoped sequence cannot make buffered-replay dedup sound".into(),
+        );
+    }
+    if model.replay_dedup_sound() && model.snapshot_source().is_none() {
+        return Outcome::Fail(
+            "replay dedup declared sound on a model that never seeds".into(),
+        );
+    }
     Outcome::Pass
 }
 
@@ -225,42 +253,53 @@ fn reconstruct_book(desc: &VenueConformance) -> Result<(SourcedOrderbook, u64), 
         model.snapshot_source(),
         Some(aetelier_connect::framework::model::SnapshotSource::ReqOnSocket)
     ) {
-        // In-band REQ seed (HTX): the REQ reply is a snapshot that arrives
-        // mid-stream — deltas keep flowing while the REQ round-trips, so the
-        // reply's WIRE position does not match its seqNum position. Mirror the
-        // runtime's buffer-and-reconcile: seed at the reply, then apply every
-        // buffered delta past the seed's seqNum in seqNum order (the chaining
-        // delta may have arrived before the reply on the wire).
-        let Some(seed_pos) = deltas.iter().rposition(|d| d.is_snapshot) else {
+        let mut buffered: Vec<NormalizedDelta> = Vec::new();
+        let mut seeded = false;
+        for mut d in deltas {
+            d.symbol = canonical.to_canonical();
+            if !seeded {
+                if d.is_snapshot {
+                    let snap_id = d.update_id;
+                    if let Err(e) = book.apply(d) {
+                        return Err(Outcome::Fail(format!(
+                            "REQ-seed apply failed: {}",
+                            e.reason
+                        )));
+                    }
+                    for bd in buffered.drain(..) {
+                        if bd.update_id <= snap_id {
+                            continue;
+                        }
+                        match book.apply(bd) {
+                            Ok(_) => applied += 1,
+                            Err(e) => {
+                                return Err(Outcome::Fail(format!(
+                                    "book gapped after {applied} clean applies replaying the buffer past the REQ seed: {}",
+                                    e.reason
+                                )));
+                            }
+                        }
+                    }
+                    seeded = true;
+                } else {
+                    buffered.push(d);
+                }
+            } else {
+                match book.apply(d) {
+                    Ok(_) => applied += 1,
+                    Err(e) => {
+                        return Err(Outcome::Fail(format!(
+                            "book gapped after {applied} clean applies past the REQ seed: {}",
+                            e.reason
+                        )));
+                    }
+                }
+            }
+        }
+        if !seeded {
             return Err(Outcome::Fail(
                 "ReqOnSocket venue: no REQ-reply snapshot in the fixture".into(),
             ));
-        };
-        let mut seed = deltas[seed_pos].clone();
-        let seed_id = seed.update_id;
-        seed.symbol = canonical.to_canonical();
-        if let Err(e) = book.apply(seed) {
-            return Err(Outcome::Fail(format!(
-                "REQ-seed apply failed: {}",
-                e.reason
-            )));
-        }
-        let mut chain: Vec<_> = deltas
-            .into_iter()
-            .filter(|d| !d.is_snapshot && d.update_id > seed_id)
-            .collect();
-        chain.sort_by_key(|d| d.update_id);
-        for mut d in chain {
-            d.symbol = canonical.to_canonical();
-            match book.apply(d) {
-                Ok(_) => applied += 1,
-                Err(e) => {
-                    return Err(Outcome::Fail(format!(
-                        "book gapped after {applied} clean applies past the REQ seed: {}",
-                        e.reason
-                    )));
-                }
-            }
         }
     } else {
         // Incremental (SeqDelta / L3), snapshot-first or REST-seeded: apply in
@@ -698,9 +737,155 @@ fn gap_detection(desc: &VenueConformance) -> Outcome {
     }
 }
 
+fn book_runtime_replay(desc: &VenueConformance) -> Outcome {
+    use aetelier_connect::framework::budget::SourceMetrics;
+    use aetelier_connect::framework::rest::RestSnapshot;
+    use aetelier_connect::framework::runtime::{
+        ReconstructedEvent, RuntimeOutcome, SourceRuntime,
+    };
+
+    let adapter = *registry().get(desc.venue).unwrap();
+    let model = adapter.book_model("orders");
+    let events = match replay_all(desc) {
+        Ok(e) => e,
+        Err(e) => return Outcome::Fail(e),
+    };
+    if !events.iter().any(|ev| matches!(ev, DomainEvent::Book(_))) {
+        if desc.expect_classes.contains(&Class::Book) {
+            return Outcome::Fail(
+                "Book class declared but no book deltas in the fixture".into(),
+            );
+        }
+        return Outcome::NotApplicable("venue declares no Book class".into());
+    }
+
+    struct FixedSeeder(NormalizedDelta);
+
+    #[async_trait::async_trait]
+    impl RestSnapshot for FixedSeeder {
+        async fn fetch_snapshot(
+            &self,
+            _symbol: &str,
+        ) -> Result<NormalizedDelta, aetelier_connect::errors::ExchangeError> {
+            Ok(self.0.clone())
+        }
+    }
+
+    let seeder: Option<std::sync::Arc<dyn RestSnapshot>> = if model.needs_rest() {
+        let Some(rest_rel) = desc.rest_fixture else {
+            return Outcome::Fail(
+                "REST-seeded venue has no rest_fixture in the descriptor".into(),
+            );
+        };
+        let raw = match fixture_raw(rest_rel) {
+            Ok(r) => r,
+            Err(e) => return Outcome::Fail(e),
+        };
+        match adapter.replay_seed(&raw, desc.wire_symbol) {
+            Ok(Some(s)) => Some(std::sync::Arc::new(FixedSeeder(s))),
+            Ok(None) => {
+                return Outcome::Fail(
+                    "REST-model adapter returned no seed from the fixture".into(),
+                );
+            }
+            Err(e) => return Outcome::Fail(format!("seed parse failed: {e}")),
+        }
+    } else {
+        None
+    };
+
+    let rt = match tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+    {
+        Ok(rt) => rt,
+        Err(e) => return Outcome::Fail(format!("tokio runtime: {e}")),
+    };
+    rt.block_on(async move {
+        let metrics = SourceMetrics::default();
+        let runtime = SourceRuntime::new(
+            desc.venue,
+            adapter.profile().symbol_codec.clone(),
+            vec![desc.wire_symbol.to_string()],
+            model.clone(),
+            model.recovery_action(),
+            metrics.clone(),
+            aetelier_connect::framework::protocol::DeclaredSet::all(),
+        );
+        let (ev_tx, ev_rx) = tokio::sync::mpsc::channel(events.len() + 1);
+        for ev in events {
+            if ev_tx.send(ev).await.is_err() {
+                return Outcome::Fail("runtime event channel closed early".into());
+            }
+        }
+        drop(ev_tx);
+        let (out_tx, mut out_rx) = tokio::sync::mpsc::channel(4096);
+        let (_sd_tx, sd_rx) = tokio::sync::watch::channel(false);
+        let run = tokio::spawn(runtime.run(ev_rx, seeder, out_tx, sd_rx));
+        let mut last_book = None;
+        let mut books = 0u64;
+        while let Some(ev) = out_rx.recv().await {
+            if let ReconstructedEvent::Book { book, .. } = ev {
+                books += 1;
+                last_book = Some(book);
+            }
+        }
+        let outcome = match run.await {
+            Ok(o) => o,
+            Err(e) => return Outcome::Fail(format!("runtime task panicked: {e}")),
+        };
+        if !matches!(outcome, RuntimeOutcome::Finished) {
+            return Outcome::Fail(format!(
+                "real runtime ended {outcome:?} on the committed capture — the fixture must replay gap-free"
+            ));
+        }
+        let m = metrics.snapshot();
+        if m.gaps != 0 || m.resyncs != 0 {
+            return Outcome::Fail(format!(
+                "real runtime counted gaps={} resyncs={} replaying the committed capture",
+                m.gaps, m.resyncs
+            ));
+        }
+        if books == 0 {
+            return Outcome::Fail("real runtime emitted no reconstructed books".into());
+        }
+        match last_book {
+            Some(b) if !b.bids.is_empty() || !b.asks.is_empty() => Outcome::Pass,
+            Some(_) => Outcome::Fail("final reconstructed book is empty".into()),
+            None => Outcome::Fail("no final book".into()),
+        }
+    })
+}
+
+fn datatype_isolation(desc: &VenueConformance) -> Outcome {
+    if !desc.datatype_isolation_done {
+        return Outcome::NotApplicable(
+            "declared-datatype subscribe filtering (C1) not yet enforced for this venue"
+                .into(),
+        );
+    }
+    Outcome::Fail(
+        "datatype_isolation_done flipped but the C1 assertions are not wired yet — \
+         implement the declared-set subscribe/runtime checks before flipping"
+            .into(),
+    )
+}
+
 /// The kinds registry. Adding an entry here ratchets the kind to every venue
 /// via `conformance_suite!`.
 pub const KINDS: &[Kind] = &[
+    Kind {
+        name: "book_runtime_replay",
+        atlas: "DAT-OB-S-5/S-6 seed race + Buffering, replayed through the REAL SourceRuntime",
+        invariants: &[],
+        run: book_runtime_replay,
+    },
+    Kind {
+        name: "datatype_isolation",
+        atlas: "declared-datatype isolation (C1/C6): disabled datatypes yield no channels and no events",
+        invariants: &[],
+        run: datatype_isolation,
+    },
     Kind {
         name: "decode_surface",
         atlas: "DAT-CN decode, normalize boundary",

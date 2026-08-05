@@ -27,6 +27,7 @@ use crate::framework::model::{
     DomainEvent, Normalizer, ReconstructionModel, SeqPredicate, SnapshotSource,
     epoch_to_us,
 };
+use crate::framework::protocol::DeclaredSet;
 use crate::framework::protocol::{Heartbeat, ProtocolHooks};
 use crate::framework::registry::{ExchangeAdapter, ExchangeProfile, TaskExit};
 use crate::framework::symbol::SymbolCodec;
@@ -69,7 +70,11 @@ impl ProtocolHooks for BitgetHooks {
     /// One `subscribe` op; `args` fans out over `(symbol × {books, trade})`,
     /// each tagged `instType:"SPOT"`. `symbols` are venue wire symbols
     /// (`"BTCUSDT"`, Concat codec).
-    fn subscribe_frames(&self, symbols: &[String]) -> Vec<Message> {
+    fn subscribe_frames(
+        &self,
+        symbols: &[String],
+        _declared: &DeclaredSet,
+    ) -> Vec<Message> {
         let mut args = Vec::with_capacity(symbols.len() * 2);
         for s in symbols {
             args.push(serde_json::json!({
@@ -254,6 +259,7 @@ impl ExchangeAdapter for BitgetAdapter {
     fn spawn(
         &self,
         symbols: Vec<String>,
+        declared: DeclaredSet,
         tx: mpsc::Sender<DomainEvent>,
         shutdown: watch::Receiver<bool>,
         metrics: SourceMetrics,
@@ -261,6 +267,7 @@ impl ExchangeAdapter for BitgetAdapter {
         tokio::spawn(drive::<BitgetHooks, BitgetDecoder, BitgetNormalizer>(
             Arc::new(BitgetHooks),
             symbols,
+            declared,
             BitgetNormalizer {
                 metrics: metrics.clone(),
             },
@@ -385,7 +392,8 @@ mod tests {
 
     #[test]
     fn subscribe_frame_uses_op_args_for_books_and_trade() {
-        let frames = BitgetHooks.subscribe_frames(&["BTCUSDT".to_string()]);
+        let frames =
+            BitgetHooks.subscribe_frames(&["BTCUSDT".to_string()], &DeclaredSet::all());
         assert_eq!(frames.len(), 1);
         let Message::Text(body) = &frames[0] else {
             panic!("expected a text frame");

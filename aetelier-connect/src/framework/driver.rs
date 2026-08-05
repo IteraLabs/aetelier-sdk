@@ -39,6 +39,7 @@ pub const STOP_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_se
 pub async fn drive<H, D, N>(
     hooks: Arc<H>,
     symbols: Vec<String>,
+    declared: aetelier_types::config::markets::market_config::DeclaredSet,
     normalizer: N,
     tx: mpsc::Sender<DomainEvent>,
     mut shutdown: watch::Receiver<bool>,
@@ -54,7 +55,7 @@ where
     // normalizes → DomainEvent → the caller's `tx`.
     let (raw_tx, mut raw_rx) = mpsc::channel::<(D::Event, u64)>(buffer);
     let rtt_us = Arc::new(AtomicU64::new(0));
-    let transport = WssTransport::<H, D>::new(hooks, symbols);
+    let transport = WssTransport::<H, D>::new(hooks, symbols, declared);
     let transport_task = tokio::spawn(transport.run(raw_tx, rtt_us.clone(), metrics));
 
     loop {

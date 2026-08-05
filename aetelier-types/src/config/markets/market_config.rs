@@ -159,6 +159,87 @@ pub struct DataTypesSection {
     pub open_interest: FeedToggle,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum DeclaredDatatype {
+    Orderbook,
+    Trades,
+    Liquidations,
+    FundingRates,
+    OpenInterest,
+}
+
+impl DeclaredDatatype {
+    pub const ALL: [DeclaredDatatype; 5] = [
+        DeclaredDatatype::Orderbook,
+        DeclaredDatatype::Trades,
+        DeclaredDatatype::Liquidations,
+        DeclaredDatatype::FundingRates,
+        DeclaredDatatype::OpenInterest,
+    ];
+
+    pub fn id(&self) -> &'static str {
+        match self {
+            DeclaredDatatype::Orderbook => "orderbook",
+            DeclaredDatatype::Trades => "trades",
+            DeclaredDatatype::Liquidations => "liquidations",
+            DeclaredDatatype::FundingRates => "funding_rates",
+            DeclaredDatatype::OpenInterest => "open_interest",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DeclaredSet {
+    enabled: std::collections::BTreeSet<DeclaredDatatype>,
+}
+
+impl DeclaredSet {
+    pub fn from_section(section: &DataTypesSection) -> Self {
+        let mut enabled = std::collections::BTreeSet::new();
+        for dt in DeclaredDatatype::ALL {
+            let on = match dt {
+                DeclaredDatatype::Orderbook => section.orderbook.enabled,
+                DeclaredDatatype::Trades => section.trades.enabled,
+                DeclaredDatatype::Liquidations => section.liquidations.enabled,
+                DeclaredDatatype::FundingRates => section.funding_rates.enabled,
+                DeclaredDatatype::OpenInterest => section.open_interest.enabled,
+            };
+            if on {
+                enabled.insert(dt);
+            }
+        }
+        Self { enabled }
+    }
+
+    pub fn all() -> Self {
+        Self {
+            enabled: DeclaredDatatype::ALL.into_iter().collect(),
+        }
+    }
+
+    pub fn contains(&self, dt: DeclaredDatatype) -> bool {
+        self.enabled.contains(&dt)
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = DeclaredDatatype> + '_ {
+        self.enabled.iter().copied()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.enabled.is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.enabled.len()
+    }
+}
+
+impl DataTypesSection {
+    pub fn declared_set(&self) -> DeclaredSet {
+        DeclaredSet::from_section(self)
+    }
+}
+
 impl DataTypesSection {
     /// Return the names of all enabled feeds as lowercase strings.
     ///
@@ -279,12 +360,16 @@ pub enum SyncMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 pub enum TimeUnit {
     /// Nanoseconds.
+    #[serde(alias = "nanos", alias = "ns", alias = "nanoseconds")]
     Nanos,
     /// Microseconds.
+    #[serde(alias = "micros", alias = "us", alias = "microseconds")]
     Micros,
     /// Milliseconds.
+    #[serde(alias = "millis", alias = "ms", alias = "milliseconds")]
     Millis,
     /// Seconds.
+    #[serde(alias = "secs", alias = "s", alias = "seconds", alias = "Seconds")]
     Secs,
 }
 
@@ -484,5 +569,61 @@ impl std::fmt::Display for TimeUnit {
             Self::Millis => write!(f, "ms"),
             Self::Secs => write!(f, "s"),
         }
+    }
+}
+
+#[cfg(test)]
+mod time_unit_tests {
+    use super::TimeUnit;
+
+    #[derive(serde::Deserialize)]
+    struct Freq {
+        unit: TimeUnit,
+    }
+
+    #[test]
+    fn time_unit_accepts_common_aliases() {
+        for (raw, want) in [
+            ("Secs", TimeUnit::Secs),
+            ("secs", TimeUnit::Secs),
+            ("s", TimeUnit::Secs),
+            ("seconds", TimeUnit::Secs),
+            ("Seconds", TimeUnit::Secs),
+            ("Millis", TimeUnit::Millis),
+            ("millis", TimeUnit::Millis),
+            ("ms", TimeUnit::Millis),
+            ("milliseconds", TimeUnit::Millis),
+            ("Micros", TimeUnit::Micros),
+            ("us", TimeUnit::Micros),
+            ("Nanos", TimeUnit::Nanos),
+            ("ns", TimeUnit::Nanos),
+        ] {
+            let f: Freq = toml::from_str(&format!("unit = \"{raw}\"")).unwrap();
+            assert_eq!(f.unit, want, "{raw}");
+        }
+        assert!(toml::from_str::<Freq>("unit = \"fortnights\"").is_err());
+    }
+}
+
+#[cfg(test)]
+mod declared_set_tests {
+    use super::*;
+
+    #[test]
+    fn declared_set_mirrors_enabled_toggles_generically() {
+        let mut section = DataTypesSection::default();
+        section.orderbook.enabled = true;
+        section.funding_rates.enabled = true;
+        let set = section.declared_set();
+        assert!(set.contains(DeclaredDatatype::Orderbook));
+        assert!(set.contains(DeclaredDatatype::FundingRates));
+        assert!(!set.contains(DeclaredDatatype::Trades));
+        assert_eq!(set.len(), 2);
+        assert_eq!(
+            set.iter().map(|d| d.id()).collect::<Vec<_>>(),
+            vec!["orderbook", "funding_rates"]
+        );
+        assert_eq!(DeclaredSet::all().len(), DeclaredDatatype::ALL.len());
+        assert!(DataTypesSection::default().declared_set().is_empty());
     }
 }

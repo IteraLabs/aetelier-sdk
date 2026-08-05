@@ -78,6 +78,7 @@ async fn main() -> anyhow::Result<()> {
         let (recon_tx, mut recon_rx) = mpsc::channel(4096);
         let adapter_handle = adapter.spawn(
             wire_symbols.clone(),
+            aetelier_connect::framework::protocol::DeclaredSet::all(),
             dev_tx,
             shutdown_rx.clone(),
             SourceMetrics::default(),
@@ -89,6 +90,7 @@ async fn main() -> anyhow::Result<()> {
             model.clone(),
             recovery,
             SourceMetrics::default(),
+            aetelier_connect::framework::protocol::DeclaredSet::all(),
         );
         let runtime_handle = tokio::spawn(runtime.run(
             dev_rx,

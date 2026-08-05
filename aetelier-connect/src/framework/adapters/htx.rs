@@ -29,6 +29,7 @@ use crate::framework::model::{
     DomainEvent, Normalizer, ReconstructionModel, SeqPredicate, SnapshotSource,
     epoch_to_us,
 };
+use crate::framework::protocol::DeclaredSet;
 use crate::framework::protocol::{
     ControlAction, FrameCodec, Heartbeat, Prepared, ProtocolHooks,
 };
@@ -85,7 +86,11 @@ impl ProtocolHooks for HtxHooks {
     }
 
     /// One `sub` frame per `(symbol × {mbp, trade})` topic.
-    fn subscribe_frames(&self, symbols: &[String]) -> Vec<Message> {
+    fn subscribe_frames(
+        &self,
+        symbols: &[String],
+        _declared: &DeclaredSet,
+    ) -> Vec<Message> {
         let mut frames = Vec::with_capacity(symbols.len() * 2);
         for s in symbols {
             frames.push(Message::Text(
@@ -136,6 +141,7 @@ impl ProtocolHooks for HtxHooks {
             .collect();
         Ok(Prepared {
             extra_frames,
+            extra_frames_delay: Some(std::time::Duration::from_secs(3)),
             ..Default::default()
         })
     }
@@ -299,6 +305,7 @@ impl ExchangeAdapter for HtxAdapter {
     fn spawn(
         &self,
         symbols: Vec<String>,
+        declared: DeclaredSet,
         tx: mpsc::Sender<DomainEvent>,
         shutdown: watch::Receiver<bool>,
         metrics: SourceMetrics,
@@ -309,6 +316,7 @@ impl ExchangeAdapter for HtxAdapter {
         tokio::spawn(drive::<HtxHooks, HtxDecoder, HtxNormalizer>(
             hooks,
             symbols,
+            declared,
             HtxNormalizer {
                 metrics: metrics.clone(),
             },
@@ -338,7 +346,7 @@ impl ExchangeAdapter for HtxAdapter {
 mod tests {
     use super::*;
     use crate::clients::wss::WssDecoder;
-    use crate::sources::htx::responses::orderbooks::HtxMbpUpdate;
+    use crate::sources::htx::responses::orderbooks::{HtxMbpSnapshot, HtxMbpUpdate};
 
     #[test]
     fn normalizes_mbp_update_with_prev_pointer() {
@@ -361,6 +369,30 @@ mod tests {
                 assert_eq!(nd.update_id, 101);
                 assert_eq!(nd.sequence, 100); // prevSeqNum → ExactPrev pointer
                 assert!(!nd.is_snapshot);
+            }
+            other => panic!("expected Book, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn normalizes_req_reply_as_in_band_snapshot() {
+        let s = HtxMbpSnapshot {
+            rep: "market.btcusdt.mbp.150".into(),
+            ts: 1_700_000_000_000,
+            data: HtxMbpTick {
+                seq_num: 100,
+                prev_seq_num: None,
+                bids: vec![HtxLevel(100.0, 1.5)],
+                asks: vec![HtxLevel(101.0, 2.0)],
+            },
+        };
+        let evs = HtxNormalizer::default().normalize(HtxWssEvent::MbpSnapshot(s));
+        assert_eq!(evs.len(), 1);
+        match &evs[0] {
+            DomainEvent::Book(nd) => {
+                assert_eq!(nd.update_id, 100);
+                assert_eq!(nd.sequence, 0);
+                assert!(nd.is_snapshot, "the req reply is the in-band seed");
             }
             other => panic!("expected Book, got {other:?}"),
         }
@@ -390,6 +422,11 @@ mod tests {
         };
         let prepared = hooks.prepare().await.unwrap();
         assert_eq!(prepared.extra_frames.len(), 2);
+        assert_eq!(
+            prepared.extra_frames_delay,
+            Some(std::time::Duration::from_secs(3)),
+            "REQ must trail the subscribe so the reply lands inside the buffered range"
+        );
         let Message::Text(first) = &prepared.extra_frames[0] else {
             panic!("expected text REQ frame");
         };

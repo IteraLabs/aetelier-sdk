@@ -21,6 +21,7 @@ use crate::framework::driver::{DEFAULT_RAW_BUFFER, drive};
 use crate::framework::model::{
     DomainEvent, Normalizer, ReconstructionModel, SnapshotSource, epoch_to_us,
 };
+use crate::framework::protocol::DeclaredSet;
 use crate::framework::protocol::{Heartbeat, ProtocolHooks};
 use crate::framework::registry::{ExchangeAdapter, ExchangeProfile, TaskExit};
 use crate::framework::symbol::SymbolCodec;
@@ -41,7 +42,11 @@ impl ProtocolHooks for BitsoHooks {
     }
 
     /// One `{action,book,type}` object per `(book × {diff-orders, trades})`.
-    fn subscribe_frames(&self, symbols: &[String]) -> Vec<Message> {
+    fn subscribe_frames(
+        &self,
+        symbols: &[String],
+        _declared: &DeclaredSet,
+    ) -> Vec<Message> {
         let mut frames = Vec::with_capacity(symbols.len() * 2);
         for s in symbols {
             frames.push(Message::Text(
@@ -252,6 +257,7 @@ impl ExchangeAdapter for BitsoAdapter {
     fn spawn(
         &self,
         symbols: Vec<String>,
+        declared: DeclaredSet,
         tx: mpsc::Sender<DomainEvent>,
         shutdown: watch::Receiver<bool>,
         metrics: SourceMetrics,
@@ -259,6 +265,7 @@ impl ExchangeAdapter for BitsoAdapter {
         tokio::spawn(drive::<BitsoHooks, BitsoDecoder, BitsoNormalizer>(
             Arc::new(BitsoHooks),
             symbols,
+            declared,
             BitsoNormalizer {
                 metrics: metrics.clone(),
                 ..Default::default()
@@ -382,7 +389,8 @@ mod tests {
 
     #[test]
     fn subscribe_frame_uses_action_book_type() {
-        let frames = BitsoHooks.subscribe_frames(&["btc_mxn".to_string()]);
+        let frames =
+            BitsoHooks.subscribe_frames(&["btc_mxn".to_string()], &DeclaredSet::all());
         assert_eq!(frames.len(), 2);
         let Message::Text(body) = &frames[0] else {
             panic!("expected a text frame");

@@ -82,6 +82,7 @@ struct SourceMetricsInner {
     reconcile_fetches: AtomicU64,
     reconcile_failures: AtomicU64,
     reseed_exhausted: AtomicU64,
+    undeclared_dropped: AtomicU64,
     seeds_abandoned: AtomicU64,
 }
 
@@ -165,6 +166,8 @@ pub struct SourceMetricsSnapshot {
     /// unhealthy, not the stream.
     #[serde(default)]
     pub reseed_exhausted: u64,
+    #[serde(default)]
+    pub undeclared_dropped: u64,
     /// Seed fetches still in flight when the runtime exited on a
     /// shutdown/resync path — abandoned, never applied. Bounds the "seed was
     /// requested but no book appeared" ambiguity.
@@ -272,6 +275,12 @@ impl SourceMetrics {
     }
     /// A reseed budget exhausted and escalated to reconnect (also counted in
     /// `resyncs`; this is the dedicated exhaustion alarm).
+    pub fn bump_undeclared_dropped(&self) {
+        self.inner
+            .undeclared_dropped
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
     pub fn bump_reseed_exhausted(&self) {
         self.inner.reseed_exhausted.fetch_add(1, Ordering::Relaxed);
     }
@@ -305,6 +314,7 @@ impl SourceMetrics {
             reconcile_fetches: i.reconcile_fetches.load(Ordering::Relaxed),
             reconcile_failures: i.reconcile_failures.load(Ordering::Relaxed),
             reseed_exhausted: i.reseed_exhausted.load(Ordering::Relaxed),
+            undeclared_dropped: i.undeclared_dropped.load(Ordering::Relaxed),
             seeds_abandoned: i.seeds_abandoned.load(Ordering::Relaxed),
         }
     }

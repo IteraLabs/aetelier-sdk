@@ -72,6 +72,7 @@ pub trait ExchangeAdapter: Send + Sync + 'static {
     fn spawn(
         &self,
         symbols: Vec<String>,
+        declared: aetelier_types::config::markets::market_config::DeclaredSet,
         tx: tokio::sync::mpsc::Sender<DomainEvent>,
         shutdown: tokio::sync::watch::Receiver<bool>,
         metrics: SourceMetrics,

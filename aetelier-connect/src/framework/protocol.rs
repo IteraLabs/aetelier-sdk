@@ -5,6 +5,7 @@
 //! (`super::transport::WssTransport`) can be shared across venues.
 
 use crate::errors::ExchangeError;
+pub use aetelier_types::config::markets::market_config::{DeclaredDatatype, DeclaredSet};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio_tungstenite::tungstenite::protocol::Message;
@@ -147,6 +148,7 @@ pub struct Prepared {
     pub heartbeat_override: Option<Heartbeat>,
     /// Frames to send immediately after the subscribe frames (HTX REQ seed).
     pub extra_frames: Vec<Message>,
+    pub extra_frames_delay: Option<Duration>,
 }
 
 /// The per-venue WSS protocol behavior. Implementing this + a `WssDecoder`
@@ -158,7 +160,15 @@ pub trait ProtocolHooks: Send + Sync + 'static {
 
     /// Frames to subscribe a SET of symbols on one socket. Returning a `Vec`
     /// lets venues that need one-frame-per-topic (HTX/Bitfinex) emit many.
-    fn subscribe_frames(&self, symbols: &[String]) -> Vec<Message>;
+    fn subscribe_frames(
+        &self,
+        symbols: &[String],
+        declared: &DeclaredSet,
+    ) -> Vec<Message>;
+
+    fn channel_map(&self) -> &'static [(DeclaredDatatype, &'static str)] {
+        &[]
+    }
 
     /// Heartbeat strategy. Default: passive (no client heartbeat).
     fn heartbeat(&self) -> Heartbeat {

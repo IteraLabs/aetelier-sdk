@@ -225,6 +225,7 @@ impl MarketWorker {
             flusher,
             terminal_cb,
             flush_cb,
+            config.common.datatypes.declared_set(),
         )
         .map_err(|e| ConnectError::Sink(e.to_string()))?;
 
@@ -887,6 +888,7 @@ impl MarketWorker {
         let mut drain_partial = false;
         // Reconnect loop: a runtime that ends on `ResyncRequired` (a self-seeded
         // book gapped) or a socket disconnect re-establishes the connection — a
+        let declared_set = core.datatypes().declared_set();
         // fresh subscribe re-seeds. Shutdown / `Stop` exits.
         while !stopped && !*shutdown.borrow() {
             // Ingest: adapter -> DomainEvent. Sync: DomainEvent -> ReconstructedEvent.
@@ -896,6 +898,7 @@ impl MarketWorker {
             let (dev_tx, dev_rx) = mpsc::channel(channel_capacity);
             let adapter_handle = adapter.spawn(
                 vec![symbol.clone()],
+                declared_set.clone(),
                 dev_tx,
                 shutdown.clone(),
                 metrics.clone(),
@@ -907,6 +910,7 @@ impl MarketWorker {
                 model.clone(),
                 recovery,
                 metrics.clone(),
+                declared_set.clone(),
             )
             .with_feeds(feeds.clone())
             .with_trade_seq_carry(trade_seq_carry.clone())

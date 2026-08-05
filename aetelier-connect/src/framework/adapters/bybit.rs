@@ -19,6 +19,7 @@ use crate::framework::driver::{DEFAULT_RAW_BUFFER, drive};
 use crate::framework::model::{
     DomainEvent, Normalizer, ReconstructionModel, SeqPredicate, SnapshotSource,
 };
+use crate::framework::protocol::DeclaredSet;
 use crate::framework::protocol::{AckOutcome, Heartbeat, ProtocolHooks};
 use crate::framework::registry::{ExchangeAdapter, ExchangeProfile, TaskExit};
 use crate::framework::symbol::SymbolCodec;
@@ -57,7 +58,11 @@ impl ProtocolHooks for BybitHooks {
     /// One `subscribe` op; `args` fans out over `(symbol × {orderbook.50,
     /// publicTrade})`. `symbols` are venue wire symbols (`"BTCUSDT"`, Concat
     /// codec).
-    fn subscribe_frames(&self, symbols: &[String]) -> Vec<Message> {
+    fn subscribe_frames(
+        &self,
+        symbols: &[String],
+        _declared: &DeclaredSet,
+    ) -> Vec<Message> {
         let mut args = Vec::with_capacity(symbols.len() * 2);
         for s in symbols {
             args.push(format!("orderbook.{BOOK_DEPTH}.{s}"));
@@ -240,6 +245,7 @@ impl ExchangeAdapter for BybitAdapter {
     fn spawn(
         &self,
         symbols: Vec<String>,
+        declared: DeclaredSet,
         tx: mpsc::Sender<DomainEvent>,
         shutdown: watch::Receiver<bool>,
         metrics: SourceMetrics,
@@ -247,6 +253,7 @@ impl ExchangeAdapter for BybitAdapter {
         tokio::spawn(drive::<BybitHooks, BybitDecoder, BybitNormalizer>(
             Arc::new(BybitHooks),
             symbols,
+            declared,
             BybitNormalizer {
                 metrics: metrics.clone(),
             },
@@ -469,7 +476,8 @@ mod tests {
 
     #[test]
     fn subscribe_frame_uses_op_args_for_orderbook_and_trades() {
-        let frames = BybitHooks.subscribe_frames(&["BTCUSDT".to_string()]);
+        let frames =
+            BybitHooks.subscribe_frames(&["BTCUSDT".to_string()], &DeclaredSet::all());
         assert_eq!(frames.len(), 1);
         let Message::Text(body) = &frames[0] else {
             panic!("expected a text frame");
