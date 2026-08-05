@@ -29,6 +29,15 @@ impl WssDecoder for HyperliquidDecoder {
                     .map_err(|e| Box::new(ExchangeError::JsonError(e)))?;
                 Ok(Some(HyperliquidWssEvent::Trades(trades)))
             }
+            Some("activeAssetCtx") => {
+                let data = v
+                    .get_mut("data")
+                    .map(serde_json::Value::take)
+                    .unwrap_or(serde_json::Value::Null);
+                let msg = serde_json::from_value(data)
+                    .map_err(|e| Box::new(ExchangeError::JsonError(e)))?;
+                Ok(Some(HyperliquidWssEvent::AssetCtx(msg)))
+            }
             _ => Ok(None),
         }
     }

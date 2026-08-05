@@ -37,7 +37,7 @@ conformance cycles; hyperliquid captured 2026-08-05 (cycle #5).
 | gateio | `gateio/btcusdt_book_trade.jsonl` | WSS book + trade | 400 | 379K |
 | htx | `htx/btcusdt_book_trade.jsonl` | WSS book + trade (gzip, mid-stream REQ seed) | 231 | 127K |
 | htx | `htx/btcusdt_trades_density.jsonl` | trade.detail frames only, selected from a live 600s window (2026-07-16; 50 trades, tradeId dense +1 after per-tick reverse — the loss-accounting density evidence) | 43 | 12K |
-| hyperliquid | `hyperliquid/btc_book_trade.jsonl` | WSS full-book + trade (600s window, captured 2026-08-05; 112 l2Book snapshots all 20×20, 728 trade frames / 1345 prints, sides A:796 B:549; perp `BTC`, decimal-string px/sz) | 861 | 560K |
+| hyperliquid | `hyperliquid/btc_book_trade.jsonl` | WSS full-book + trade + activeAssetCtx (600s window, captured 2026-08-05, stage-2; 112 l2Book snapshots all 20×20, 1458 trade frames / 4502 prints A:2560 B:1942, 587 activeAssetCtx ~1 Hz funding+OI, decimal-string values, no venue timestamp on ctx) | 2179 | 1.6M |
 | kraken | `kraken/btcusd_book_trade.jsonl` | WSS book + trade | 1800 | 326K |
 | kraken | `kraken/books_btcusd.jsonl` | WSS book (CRC32 reference) | 146 | 27K |
 | kucoin | `kucoin/btcusdt_book_trade.jsonl` | WSS book + trade | 707 | 187K |

@@ -35,6 +35,65 @@ fn replay_all(desc: &VenueConformance) -> Result<Vec<DomainEvent>, String> {
     Ok(events)
 }
 
+fn derivative_invariants(desc: &VenueConformance) -> Outcome {
+    let wants_fr = desc.expect_classes.contains(&Class::FundingRate);
+    let wants_oi = desc.expect_classes.contains(&Class::OpenInterest);
+    if !wants_fr && !wants_oi {
+        return Outcome::NotApplicable(
+            "venue declares no derivative message classes".into(),
+        );
+    }
+    let events = match replay_all(desc) {
+        Ok(e) => e,
+        Err(e) => return Outcome::Fail(e),
+    };
+    let mut fr_seen = 0usize;
+    let mut oi_seen = 0usize;
+    let one = Decimal::ONE;
+    for ev in &events {
+        match ev {
+            DomainEvent::FundingRate(fr) => {
+                fr_seen += 1;
+                if fr.funding_rate.abs() >= one {
+                    return Outcome::Fail(format!(
+                        "funding rate {} outside (-1, 1)",
+                        fr.funding_rate
+                    ));
+                }
+                if fr.interval_hours == 0 {
+                    return Outcome::Fail("funding interval_hours is 0".into());
+                }
+            }
+            DomainEvent::OpenInterest(oi) => {
+                oi_seen += 1;
+                if oi.open_interest.is_sign_negative() {
+                    return Outcome::Fail(format!(
+                        "negative open interest {}",
+                        oi.open_interest
+                    ));
+                }
+                if let Some(px) = oi.mark_px
+                    && px <= Decimal::ZERO
+                {
+                    return Outcome::Fail(format!("non-positive mark price {px}"));
+                }
+            }
+            _ => {}
+        }
+    }
+    if wants_fr && fr_seen == 0 {
+        return Outcome::Fail(
+            "FundingRate class declared but no samples in the fixture".into(),
+        );
+    }
+    if wants_oi && oi_seen == 0 {
+        return Outcome::Fail(
+            "OpenInterest class declared but no samples in the fixture".into(),
+        );
+    }
+    Outcome::Pass
+}
+
 fn class_of(ev: &DomainEvent) -> Option<Class> {
     match ev {
         DomainEvent::Book(_) => Some(Class::Book),
@@ -999,7 +1058,7 @@ fn datatype_isolation(desc: &VenueConformance) -> Outcome {
         );
     }
 
-    let mut supported = Vec::new();
+    let mut only_sets: Vec<(DeclaredDatatype, Vec<serde_json::Value>)> = Vec::new();
     for dt in DeclaredDatatype::ALL {
         let only = match canon_all(
             adapter.subscribe_frames_preview(&symbols, &DeclaredSet::only(dt)),
@@ -1007,21 +1066,55 @@ fn datatype_isolation(desc: &VenueConformance) -> Outcome {
             Ok(v) => v,
             Err(o) => return o,
         };
+        only_sets.push((dt, only));
+    }
+    let mut supported = Vec::new();
+    for (dt, only) in &only_sets {
         let without = match canon_all(
-            adapter.subscribe_frames_preview(&symbols, &DeclaredSet::all().without(dt)),
+            adapter.subscribe_frames_preview(&symbols, &DeclaredSet::all().without(*dt)),
         ) {
             Ok(v) => v,
             Err(o) => return o,
         };
-        for f in &only {
-            if without.contains(f) {
+        for f in only {
+            // A frame another declared datatype also subscribes is SHARED
+            // (Hyperliquid activeAssetCtx serves funding + open interest); it
+            // legitimately survives removal of one sharer and is checked below
+            // against removal of ALL sharers.
+            let shared = only_sets.iter().any(|(e, set)| e != dt && set.contains(f));
+            if !shared && without.contains(f) {
                 return Outcome::Fail(format!(
                     "a frame exclusive to {dt:?} is still subscribed when {dt:?} is disabled: {f}"
                 ));
             }
         }
         if !only.is_empty() {
-            supported.push(dt);
+            supported.push(*dt);
+        }
+    }
+    for f in &full {
+        let sharers: Vec<DeclaredDatatype> = only_sets
+            .iter()
+            .filter(|(_, set)| set.contains(f))
+            .map(|(dt, _)| *dt)
+            .collect();
+        if sharers.is_empty() {
+            continue;
+        }
+        let mut removed = DeclaredSet::all();
+        for s in &sharers {
+            removed = removed.without(*s);
+        }
+        let remaining =
+            match canon_all(adapter.subscribe_frames_preview(&symbols, &removed)) {
+                Ok(v) => v,
+                Err(o) => return o,
+            };
+        if remaining.contains(f) {
+            return Outcome::Fail(format!(
+                "frame survives removal of every datatype that subscribes it \
+                 ({sharers:?}): {f}"
+            ));
         }
     }
     for must in [DeclaredDatatype::Orderbook, DeclaredDatatype::Trades] {
@@ -1130,5 +1223,12 @@ pub const KINDS: &[Kind] = &[
         atlas: "DAT-OB ChecksumDelta, fail-closed on absent checksum",
         invariants: &[],
         run: checksum_validation,
+    },
+    Kind {
+        name: "derivative_invariants",
+        atlas: "funding/open-interest sample physics: bounded rate, positive OI, \
+                declared interval, decimal-string parse discipline",
+        invariants: &[],
+        run: derivative_invariants,
     },
 ];

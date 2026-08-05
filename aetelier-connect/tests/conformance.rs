@@ -220,7 +220,12 @@ const HYPERLIQUID: VenueConformance = VenueConformance {
     expect_needs_rest: false,
     ws_fixture: "hyperliquid/btc_book_trade.jsonl",
     rest_fixture: None,
-    expect_classes: &[Class::Book, Class::Trade],
+    expect_classes: &[
+        Class::Book,
+        Class::Trade,
+        Class::FundingRate,
+        Class::OpenInterest,
+    ],
     done: true,
     datatype_isolation_done: true,
 };
@@ -283,6 +288,10 @@ macro_rules! conformance_suite {
             #[test]
             fn checksum_validation() {
                 harness::assert_kind(&$desc, kind("checksum_validation"));
+            }
+            #[test]
+            fn derivative_invariants() {
+                harness::assert_kind(&$desc, kind("derivative_invariants"));
             }
         }
     };

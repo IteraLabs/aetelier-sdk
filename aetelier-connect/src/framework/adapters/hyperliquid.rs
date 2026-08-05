@@ -48,6 +48,10 @@ impl ProtocolHooks for HyperliquidHooks {
             if declared.contains(DD::Trades) {
                 frames.push(subscribe_frame("trades", symbol));
             }
+            if declared.contains(DD::FundingRates) || declared.contains(DD::OpenInterest)
+            {
+                frames.push(subscribe_frame("activeAssetCtx", symbol));
+            }
         }
         frames
     }
@@ -71,9 +75,18 @@ fn subscribe_frame(channel: &str, symbol: &str) -> Message {
     )
 }
 
-#[derive(Default)]
 pub struct HyperliquidNormalizer {
     pub metrics: SourceMetrics,
+    pub declared: DeclaredSet,
+}
+
+impl Default for HyperliquidNormalizer {
+    fn default() -> Self {
+        Self {
+            metrics: SourceMetrics::default(),
+            declared: DeclaredSet::all(),
+        }
+    }
 }
 
 impl Normalizer for HyperliquidNormalizer {
@@ -111,7 +124,91 @@ impl Normalizer for HyperliquidNormalizer {
                 .into_iter()
                 .filter_map(|t| normalize_trade(t, &self.metrics))
                 .collect(),
+            HyperliquidWssEvent::AssetCtx(msg) => self.normalize_asset_ctx(msg),
         }
+    }
+}
+
+impl HyperliquidNormalizer {
+    fn normalize_asset_ctx(
+        &self,
+        msg: crate::sources::hyperliquid::responses::HyperliquidAssetCtxMsg,
+    ) -> Vec<DomainEvent> {
+        use aetelier_types::config::markets::market_config::DeclaredDatatype as DD;
+        let Some(pair) = HYPERLIQUID_CODEC.decode(&msg.coin) else {
+            tracing::warn!(symbol = %msg.coin, "hyperliquid.asset_ctx.bad_symbol");
+            self.metrics.add_dropped_frames(1);
+            return Vec::new();
+        };
+        let mut events = Vec::new();
+        let premium = msg
+            .ctx
+            .premium
+            .as_deref()
+            .and_then(|p| p.parse::<rust_decimal::Decimal>().ok());
+        let mark_px = msg
+            .ctx
+            .mark_px
+            .as_deref()
+            .and_then(|p| p.parse::<rust_decimal::Decimal>().ok());
+        if self.declared.contains(DD::FundingRates)
+            && let Some(raw) = msg.ctx.funding.as_deref()
+        {
+            match raw.parse::<rust_decimal::Decimal>() {
+                Ok(rate) => {
+                    events.push(DomainEvent::FundingRate(
+                        aetelier_types::funding::FundingRate {
+                            funding_rate_ts_us: 0,
+                            local_funding_ts_us: 0,
+                            recv_seq: 0,
+                            conn_epoch: 0,
+                            pair: pair.clone(),
+                            funding_rate: rate,
+                            premium,
+                            interval_hours: 1,
+                            next_funding_ts_us: 0,
+                            exchange: "hyperliquid".to_string(),
+                        },
+                    ));
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        symbol = %msg.coin,
+                        "hyperliquid.asset_ctx.bad_funding_decimal"
+                    );
+                    self.metrics.add_dropped_frames(1);
+                }
+            }
+        }
+        if self.declared.contains(DD::OpenInterest)
+            && let Some(raw) = msg.ctx.open_interest.as_deref()
+        {
+            match raw.parse::<rust_decimal::Decimal>() {
+                Ok(oi) => {
+                    events.push(DomainEvent::OpenInterest(
+                        aetelier_types::open_interest::OpenInterest {
+                            open_interest_ts_us: 0,
+                            local_oi_ts_us: 0,
+                            recv_seq: 0,
+                            conn_epoch: 0,
+                            pair,
+                            open_interest: oi,
+                            open_interest_value: None,
+                            mark_px,
+                            exchange: "hyperliquid".to_string(),
+                        },
+                    ));
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        symbol = %msg.coin,
+                        "hyperliquid.asset_ctx.bad_oi_decimal"
+                    );
+                    self.metrics.add_dropped_frames(1);
+                }
+            }
+        }
+        events
     }
 }
 
@@ -159,6 +256,131 @@ fn normalize_trade(
     })
 }
 
+const HYPERLIQUID_INFO_URL: &str = "https://api.hyperliquid.xyz/info";
+
+const SETTLEMENT_FETCH_DELAY_SECS: u64 = 5;
+
+const SETTLEMENT_BACKFILL_MS: u64 = 24 * 3600 * 1000;
+
+const SETTLEMENT_OVERLAP_MS: u64 = 2 * 3600 * 1000;
+
+fn now_us() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_micros() as u64
+}
+
+async fn settlement_poller(
+    symbols: Vec<String>,
+    tx: mpsc::Sender<DomainEvent>,
+    mut shutdown: watch::Receiver<bool>,
+) {
+    let client = match reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(error = %e, "hyperliquid.settlement.client_build_failed");
+            return;
+        }
+    };
+    let mut start_ms = (now_us() / 1_000).saturating_sub(SETTLEMENT_BACKFILL_MS);
+    loop {
+        for symbol in &symbols {
+            let mut attempts = 0;
+            while attempts < 2 {
+                attempts += 1;
+                match fetch_settlements(&client, symbol, start_ms, &tx).await {
+                    Ok(()) => break,
+                    Err(e) => {
+                        tracing::warn!(
+                            symbol = %symbol,
+                            attempt = attempts,
+                            error = %e,
+                            "hyperliquid.settlement.fetch_failed"
+                        );
+                        tokio::time::sleep(Duration::from_secs(30)).await;
+                    }
+                }
+            }
+        }
+        start_ms = (now_us() / 1_000).saturating_sub(SETTLEMENT_OVERLAP_MS);
+        let now_ms = now_us() / 1_000;
+        let next_hour_ms = (now_ms / 3_600_000 + 1) * 3_600_000;
+        let wait_ms =
+            next_hour_ms.saturating_sub(now_ms) + SETTLEMENT_FETCH_DELAY_SECS * 1_000;
+        tokio::select! {
+            _ = tokio::time::sleep(Duration::from_millis(wait_ms)) => {}
+            changed = shutdown.changed() => {
+                if changed.is_err() || *shutdown.borrow() {
+                    return;
+                }
+            }
+        }
+    }
+}
+
+async fn fetch_settlements(
+    client: &reqwest::Client,
+    symbol: &str,
+    start_ms: u64,
+    tx: &mpsc::Sender<DomainEvent>,
+) -> Result<(), String> {
+    use crate::sources::hyperliquid::responses::HyperliquidFundingHistoryRow;
+    let body = serde_json::json!({
+        "type": "fundingHistory",
+        "coin": symbol,
+        "startTime": start_ms,
+    });
+    let sent_at = std::time::Instant::now();
+    let resp = client
+        .post(HYPERLIQUID_INFO_URL)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    let status = resp.status();
+    if !status.is_success() {
+        return Err(format!("fundingHistory status {status}"));
+    }
+    let rows: Vec<HyperliquidFundingHistoryRow> =
+        resp.json().await.map_err(|e| e.to_string())?;
+    let rtt_us = sent_at.elapsed().as_micros() as u64;
+    let local_ts_us = now_us();
+    for row in rows {
+        let Some(pair) = HYPERLIQUID_CODEC.decode(&row.coin) else {
+            continue;
+        };
+        let Ok(rate) = row.funding_rate.parse::<rust_decimal::Decimal>() else {
+            tracing::warn!(
+                symbol = %row.coin,
+                time = row.time,
+                "hyperliquid.settlement.bad_decimal"
+            );
+            continue;
+        };
+        let premium = row
+            .premium
+            .as_deref()
+            .and_then(|p| p.parse::<rust_decimal::Decimal>().ok());
+        let fs = aetelier_types::funding::FundingSettlement {
+            funding_time_us: epoch_to_us(row.time),
+            local_ts_us,
+            rtt_us,
+            pair,
+            funding_rate: rate,
+            premium,
+            exchange: "hyperliquid".to_string(),
+        };
+        if tx.send(DomainEvent::FundingSettlement(fs)).await.is_err() {
+            return Ok(());
+        }
+    }
+    Ok(())
+}
+
 static HYPERLIQUID_PROFILE: LazyLock<ExchangeProfile> =
     LazyLock::new(|| ExchangeProfile {
         id: "hyperliquid",
@@ -197,6 +419,18 @@ impl ExchangeAdapter for HyperliquidAdapter {
         ReconstructionModel::FullRefresh
     }
 
+    fn supported_datatypes(
+        &self,
+    ) -> &'static [aetelier_types::config::markets::market_config::DeclaredDatatype] {
+        use aetelier_types::config::markets::market_config::DeclaredDatatype as DD;
+        &[
+            DD::Orderbook,
+            DD::Trades,
+            DD::FundingRates,
+            DD::OpenInterest,
+        ]
+    }
+
     fn spawn(
         &self,
         symbols: Vec<String>,
@@ -205,22 +439,40 @@ impl ExchangeAdapter for HyperliquidAdapter {
         shutdown: watch::Receiver<bool>,
         metrics: SourceMetrics,
     ) -> JoinHandle<TaskExit> {
-        tokio::spawn(drive::<
-            HyperliquidHooks,
-            HyperliquidDecoder,
-            HyperliquidNormalizer,
-        >(
-            Arc::new(HyperliquidHooks),
-            symbols,
-            declared,
-            HyperliquidNormalizer {
-                metrics: metrics.clone(),
-            },
-            tx,
-            shutdown,
-            DEFAULT_RAW_BUFFER,
-            metrics,
-        ))
+        use aetelier_types::config::markets::market_config::DeclaredDatatype as DD;
+        let poll_settlements = declared.contains(DD::FundingRates);
+        let normalizer = HyperliquidNormalizer {
+            metrics: metrics.clone(),
+            declared: declared.clone(),
+        };
+        let poller_symbols = symbols.clone();
+        let poller_tx = tx.clone();
+        let poller_shutdown = shutdown.clone();
+        tokio::spawn(async move {
+            let poller = poll_settlements.then(|| {
+                tokio::spawn(settlement_poller(
+                    poller_symbols,
+                    poller_tx,
+                    poller_shutdown,
+                ))
+            });
+            let exit =
+                drive::<HyperliquidHooks, HyperliquidDecoder, HyperliquidNormalizer>(
+                    Arc::new(HyperliquidHooks),
+                    symbols,
+                    declared,
+                    normalizer,
+                    tx,
+                    shutdown,
+                    DEFAULT_RAW_BUFFER,
+                    metrics,
+                )
+                .await;
+            if let Some(p) = poller {
+                p.abort();
+            }
+            exit
+        })
     }
 
     fn subscribe_frames_preview(
@@ -243,9 +495,7 @@ impl ExchangeAdapter for HyperliquidAdapter {
         raw: &str,
     ) -> Result<Vec<DomainEvent>, Box<crate::errors::ExchangeError>> {
         use crate::clients::wss::WssDecoder;
-        let normalizer = HyperliquidNormalizer {
-            metrics: SourceMetrics::default(),
-        };
+        let normalizer = HyperliquidNormalizer::default();
         match HyperliquidDecoder::decode(raw)? {
             Some(event) => Ok(normalizer.normalize(event)),
             None => Ok(Vec::new()),
@@ -348,7 +598,7 @@ mod tests {
         use aetelier_types::config::markets::market_config::DeclaredDatatype as DD;
         let symbols = vec!["BTC".to_string()];
         let both = HyperliquidHooks.subscribe_frames(&symbols, &DeclaredSet::all());
-        assert_eq!(both.len(), 2);
+        assert_eq!(both.len(), 3);
         let ob_only = HyperliquidHooks
             .subscribe_frames(&symbols, &DeclaredSet::only(DD::Orderbook));
         assert_eq!(ob_only.len(), 1);
@@ -367,6 +617,88 @@ mod tests {
             &DeclaredSet::only(DD::Orderbook).without(DD::Orderbook),
         );
         assert!(none.is_empty());
+    }
+
+    const CTX_FRAME: &str = r#"{"channel":"activeAssetCtx","data":{"coin":"BTC","ctx":{"funding":"0.0000125","openInterest":"12345.678","prevDayPx":"50000.0","dayNtlVlm":"123456789.0","markPx":"50100.5","midPx":"50100.0","oraclePx":"50099.0","premium":"0.00001","impactPxs":["50099.5","50100.5"],"dayBaseVlm":"2500.0"}}}"#;
+
+    #[test]
+    fn normalizes_asset_ctx_into_funding_and_oi_samples() {
+        let event = HyperliquidDecoder::decode(CTX_FRAME).unwrap().unwrap();
+        let evs = HyperliquidNormalizer::default().normalize(event);
+        assert_eq!(evs.len(), 2);
+        match &evs[0] {
+            DomainEvent::FundingRate(fr) => {
+                assert_eq!(fr.pair.to_canonical(), "BTC/USDC");
+                assert_eq!(fr.funding_rate, "0.0000125".parse().unwrap());
+                assert_eq!(fr.premium, Some("0.00001".parse().unwrap()));
+                assert_eq!(fr.interval_hours, 1);
+                assert_eq!(fr.funding_rate_ts_us, 0);
+                assert_eq!(fr.exchange, "hyperliquid");
+            }
+            other => panic!("expected FundingRate, got {other:?}"),
+        }
+        match &evs[1] {
+            DomainEvent::OpenInterest(oi) => {
+                assert_eq!(oi.open_interest, "12345.678".parse().unwrap());
+                assert_eq!(oi.mark_px, Some("50100.5".parse().unwrap()));
+                assert_eq!(oi.open_interest_value, None);
+                assert_eq!(oi.open_interest_ts_us, 0);
+            }
+            other => panic!("expected OpenInterest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn asset_ctx_respects_the_declared_set() {
+        use aetelier_types::config::markets::market_config::DeclaredDatatype as DD;
+        let event = HyperliquidDecoder::decode(CTX_FRAME).unwrap().unwrap();
+        let normalizer = HyperliquidNormalizer {
+            metrics: SourceMetrics::default(),
+            declared: DeclaredSet::only(DD::FundingRates),
+        };
+        let evs = normalizer.normalize(event);
+        assert_eq!(evs.len(), 1);
+        assert!(matches!(evs[0], DomainEvent::FundingRate(_)));
+
+        let event = HyperliquidDecoder::decode(CTX_FRAME).unwrap().unwrap();
+        let normalizer = HyperliquidNormalizer {
+            metrics: SourceMetrics::default(),
+            declared: DeclaredSet::only(DD::Orderbook),
+        };
+        assert!(normalizer.normalize(event).is_empty());
+    }
+
+    #[test]
+    fn subscribe_adds_asset_ctx_only_for_derivative_datatypes() {
+        use aetelier_types::config::markets::market_config::DeclaredDatatype as DD;
+        let symbols = vec!["BTC".to_string()];
+        let all = HyperliquidHooks.subscribe_frames(&symbols, &DeclaredSet::all());
+        assert_eq!(all.len(), 3);
+        let Message::Text(body) = &all[2] else {
+            panic!("expected a text frame");
+        };
+        let v: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert_eq!(v["subscription"]["type"], "activeAssetCtx");
+
+        let funding_only = HyperliquidHooks
+            .subscribe_frames(&symbols, &DeclaredSet::only(DD::FundingRates));
+        assert_eq!(funding_only.len(), 1);
+
+        let book_trades = HyperliquidHooks.subscribe_frames(
+            &symbols,
+            &DeclaredSet::only(DD::Orderbook)
+                .without(DD::Orderbook)
+                .without(DD::Trades),
+        );
+        assert!(book_trades.is_empty());
+        let spot_style = HyperliquidHooks.subscribe_frames(
+            &symbols,
+            &DeclaredSet::all()
+                .without(DD::FundingRates)
+                .without(DD::OpenInterest)
+                .without(DD::Liquidations),
+        );
+        assert_eq!(spot_style.len(), 2);
     }
 
     #[test]
