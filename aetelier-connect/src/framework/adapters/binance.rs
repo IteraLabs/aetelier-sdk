@@ -64,13 +64,21 @@ impl ProtocolHooks for BinanceHooks {
     fn subscribe_frames(
         &self,
         symbols: &[String],
-        _declared: &DeclaredSet,
+        declared: &DeclaredSet,
     ) -> Vec<Message> {
+        use aetelier_types::config::markets::market_config::DeclaredDatatype as DD;
         let mut params = Vec::with_capacity(symbols.len() * 2);
         for s in symbols {
             let low = s.to_lowercase();
-            params.push(format!("{low}@depth@100ms"));
-            params.push(format!("{low}@trade"));
+            if declared.contains(DD::Orderbook) {
+                params.push(format!("{low}@depth@100ms"));
+            }
+            if declared.contains(DD::Trades) {
+                params.push(format!("{low}@trade"));
+            }
+        }
+        if params.is_empty() {
+            return Vec::new();
         }
         let frame = serde_json::json!({
             "method": "SUBSCRIBE",
@@ -257,6 +265,21 @@ impl ExchangeAdapter for BinanceAdapter {
             DEFAULT_RAW_BUFFER,
             metrics,
         ))
+    }
+
+    fn subscribe_frames_preview(
+        &self,
+        symbols: &[String],
+        declared: &crate::framework::protocol::DeclaredSet,
+    ) -> Vec<String> {
+        BinanceHooks
+            .subscribe_frames(symbols, declared)
+            .into_iter()
+            .filter_map(|m| match m {
+                Message::Text(t) => Some(t.to_string()),
+                _ => None,
+            })
+            .collect()
     }
 
     fn replay_frame(

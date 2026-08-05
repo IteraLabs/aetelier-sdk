@@ -121,23 +121,28 @@ impl ProtocolHooks for KucoinHooks {
     fn subscribe_frames(
         &self,
         symbols: &[String],
-        _declared: &DeclaredSet,
+        declared: &DeclaredSet,
     ) -> Vec<Message> {
+        use aetelier_types::config::markets::market_config::DeclaredDatatype as DD;
         let csv = symbols.join(",");
-        let l2 = serde_json::json!({
-            "id": "sub-l2", "type": "subscribe",
-            "topic": format!("/market/level2:{csv}"),
-            "privateChannel": false, "response": true,
-        });
-        let m = serde_json::json!({
-            "id": "sub-match", "type": "subscribe",
-            "topic": format!("/market/match:{csv}"),
-            "privateChannel": false, "response": true,
-        });
-        vec![
-            Message::Text(l2.to_string().into()),
-            Message::Text(m.to_string().into()),
-        ]
+        let mut frames = Vec::with_capacity(2);
+        if declared.contains(DD::Orderbook) {
+            let l2 = serde_json::json!({
+                "id": "sub-l2", "type": "subscribe",
+                "topic": format!("/market/level2:{csv}"),
+                "privateChannel": false, "response": true,
+            });
+            frames.push(Message::Text(l2.to_string().into()));
+        }
+        if declared.contains(DD::Trades) {
+            let m = serde_json::json!({
+                "id": "sub-match", "type": "subscribe",
+                "topic": format!("/market/match:{csv}"),
+                "privateChannel": false, "response": true,
+            });
+            frames.push(Message::Text(m.to_string().into()));
+        }
+        frames
     }
 
     /// Bootstrap: fetch the bullet token, then derive the dynamic endpoint +
@@ -308,6 +313,21 @@ impl ExchangeAdapter for KucoinAdapter {
             DEFAULT_RAW_BUFFER,
             metrics,
         ))
+    }
+
+    fn subscribe_frames_preview(
+        &self,
+        symbols: &[String],
+        declared: &crate::framework::protocol::DeclaredSet,
+    ) -> Vec<String> {
+        KucoinHooks::with_connect_id("preview".to_string())
+            .subscribe_frames(symbols, declared)
+            .into_iter()
+            .filter_map(|m| match m {
+                Message::Text(t) => Some(t.to_string()),
+                _ => None,
+            })
+            .collect()
     }
 
     fn replay_frame(

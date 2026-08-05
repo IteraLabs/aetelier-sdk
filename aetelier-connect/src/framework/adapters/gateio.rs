@@ -89,25 +89,30 @@ impl ProtocolHooks for GateioHooks {
     fn subscribe_frames(
         &self,
         symbols: &[String],
-        _declared: &DeclaredSet,
+        declared: &DeclaredSet,
     ) -> Vec<Message> {
+        use aetelier_types::config::markets::market_config::DeclaredDatatype as DD;
         let mut frames = Vec::with_capacity(symbols.len() * 2);
         for s in symbols {
             let t = unix_secs();
-            let book = serde_json::json!({
-                "time": t,
-                "channel": BOOK_CHANNEL,
-                "event": "subscribe",
-                "payload": [s, "20", BOOK_INTERVAL],
-            });
-            let trades = serde_json::json!({
-                "time": t,
-                "channel": TRADE_CHANNEL,
-                "event": "subscribe",
-                "payload": [s],
-            });
-            frames.push(Message::Text(book.to_string().into()));
-            frames.push(Message::Text(trades.to_string().into()));
+            if declared.contains(DD::Orderbook) {
+                let book = serde_json::json!({
+                    "time": t,
+                    "channel": BOOK_CHANNEL,
+                    "event": "subscribe",
+                    "payload": [s, "20", BOOK_INTERVAL],
+                });
+                frames.push(Message::Text(book.to_string().into()));
+            }
+            if declared.contains(DD::Trades) {
+                let trades = serde_json::json!({
+                    "time": t,
+                    "channel": TRADE_CHANNEL,
+                    "event": "subscribe",
+                    "payload": [s],
+                });
+                frames.push(Message::Text(trades.to_string().into()));
+            }
         }
         frames
     }
@@ -285,6 +290,21 @@ impl ExchangeAdapter for GateioAdapter {
             DEFAULT_RAW_BUFFER,
             metrics,
         ))
+    }
+
+    fn subscribe_frames_preview(
+        &self,
+        symbols: &[String],
+        declared: &crate::framework::protocol::DeclaredSet,
+    ) -> Vec<String> {
+        GateioHooks
+            .subscribe_frames(symbols, declared)
+            .into_iter()
+            .filter_map(|m| match m {
+                Message::Text(t) => Some(t.to_string()),
+                _ => None,
+            })
+            .collect()
     }
 
     fn replay_frame(

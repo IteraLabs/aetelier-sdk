@@ -143,8 +143,9 @@ impl SourceRuntime {
         metrics: SourceMetrics,
         declared: DeclaredSet,
     ) -> Self {
-        let needs_rest = model.needs_rest();
-        let seeds_out_of_band = model.seeds_out_of_band();
+        let book_active = declared.contains(DeclaredDatatype::Orderbook);
+        let needs_rest = model.needs_rest() && book_active;
+        let seeds_out_of_band = model.seeds_out_of_band() && book_active;
         let requested = wire_symbols.len();
         let mut books = HashMap::new();
         for wire in wire_symbols {
@@ -2043,17 +2044,94 @@ mod tests {
         drop(ev_tx);
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn trades_only_collector_never_arms_the_seed_machinery() {
+        let (ev_tx, ev_rx) = mpsc::channel(16);
+        let (out_tx, mut out_rx) = mpsc::channel(16);
+        let (_sd_tx, sd_rx) = watch::channel(false);
+        let metrics = SourceMetrics::default();
+        let mut section =
+            aetelier_types::config::markets::market_config::DataTypesSection::default();
+        section.trades.enabled = true;
+        let runtime = SourceRuntime::new(
+            "htx",
+            SymbolCodec::Concat { upper: false },
+            vec!["btcusdt".to_string()],
+            htx_model(),
+            RecoveryAction::Resubscribe,
+            metrics.clone(),
+            section.declared_set(),
+        );
+
+        ev_tx
+            .send(DomainEvent::Book(nd(
+                "btcusdt",
+                vec![("100", "1")],
+                vec![("101", "1")],
+                100,
+                99,
+                false,
+            )))
+            .await
+            .unwrap();
+        ev_tx
+            .send(DomainEvent::Trade {
+                trade: Trade {
+                    source_trade_ts_us: 1,
+                    local_trade_ts_us: 0,
+                    source_trade_rtt_us: 0,
+                    pair: TradingPair::new("BTC", "USDT"),
+                    side: TradeSide::Buy,
+                    amount: aetelier_types::orderbooks::f64_to_decimal(1.0),
+                    price: aetelier_types::orderbooks::f64_to_decimal(100.0),
+                    exchange: "htx".into(),
+                    id: "t1".into(),
+                    origin: Default::default(),
+                },
+                sequence: None,
+            })
+            .await
+            .unwrap();
+        drop(ev_tx);
+
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(60),
+            runtime.run(ev_rx, None, out_tx, sd_rx),
+        )
+        .await
+        .expect("must finish without the in-band seed deadline ever arming");
+        let mut books = 0;
+        let mut trades = 0;
+        while let Some(ev) = out_rx.recv().await {
+            match ev {
+                ReconstructedEvent::Book { .. } => books += 1,
+                ReconstructedEvent::Trade(_) => trades += 1,
+            }
+        }
+        assert!(
+            matches!(outcome, RuntimeOutcome::Finished),
+            "a trades-only collector on an out-of-band-seed venue must not resync-loop"
+        );
+        assert_eq!(books, 0);
+        assert_eq!(trades, 1);
+        let m = metrics.snapshot();
+        assert_eq!(
+            m.undeclared_dropped, 1,
+            "the filtered book delta is counted"
+        );
+        assert_eq!(m.resyncs, 0, "no deadline, no seed churn");
+    }
+
     #[tokio::test]
     async fn undeclared_trades_are_dropped_and_counted_books_pass() {
         let (ev_tx, ev_rx) = mpsc::channel(16);
         let (out_tx, mut out_rx) = mpsc::channel(16);
         let (_sd_tx, sd_rx) = watch::channel(false);
         let metrics = SourceMetrics::default();
-        let mut only_books = DeclaredSet::default();
         let mut section =
             aetelier_types::config::markets::market_config::DataTypesSection::default();
         section.orderbook.enabled = true;
-        only_books = section.declared_set();
+        let only_books = section.declared_set();
         let model = ReconstructionModel::SeqDelta {
             predicate: SeqPredicate::RangeInclusive,
             source: SnapshotSource::WssSelfSeed,

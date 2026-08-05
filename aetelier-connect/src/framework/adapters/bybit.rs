@@ -61,12 +61,20 @@ impl ProtocolHooks for BybitHooks {
     fn subscribe_frames(
         &self,
         symbols: &[String],
-        _declared: &DeclaredSet,
+        declared: &DeclaredSet,
     ) -> Vec<Message> {
+        use aetelier_types::config::markets::market_config::DeclaredDatatype as DD;
         let mut args = Vec::with_capacity(symbols.len() * 2);
         for s in symbols {
-            args.push(format!("orderbook.{BOOK_DEPTH}.{s}"));
-            args.push(format!("publicTrade.{s}"));
+            if declared.contains(DD::Orderbook) {
+                args.push(format!("orderbook.{BOOK_DEPTH}.{s}"));
+            }
+            if declared.contains(DD::Trades) {
+                args.push(format!("publicTrade.{s}"));
+            }
+        }
+        if args.is_empty() {
+            return Vec::new();
         }
         let frame = serde_json::json!({ "op": "subscribe", "args": args });
         vec![Message::Text(frame.to_string().into())]
@@ -262,6 +270,21 @@ impl ExchangeAdapter for BybitAdapter {
             DEFAULT_RAW_BUFFER,
             metrics,
         ))
+    }
+
+    fn subscribe_frames_preview(
+        &self,
+        symbols: &[String],
+        declared: &crate::framework::protocol::DeclaredSet,
+    ) -> Vec<String> {
+        BybitHooks
+            .subscribe_frames(symbols, declared)
+            .into_iter()
+            .filter_map(|m| match m {
+                Message::Text(t) => Some(t.to_string()),
+                _ => None,
+            })
+            .collect()
     }
 
     fn replay_frame(

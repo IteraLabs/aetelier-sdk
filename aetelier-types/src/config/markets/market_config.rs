@@ -217,6 +217,18 @@ impl DeclaredSet {
         }
     }
 
+    pub fn only(dt: DeclaredDatatype) -> Self {
+        let mut enabled = std::collections::BTreeSet::new();
+        enabled.insert(dt);
+        Self { enabled }
+    }
+
+    pub fn without(&self, dt: DeclaredDatatype) -> Self {
+        let mut enabled = self.enabled.clone();
+        enabled.remove(&dt);
+        Self { enabled }
+    }
+
     pub fn contains(&self, dt: DeclaredDatatype) -> bool {
         self.enabled.contains(&dt)
     }

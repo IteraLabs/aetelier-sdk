@@ -73,16 +73,24 @@ impl ProtocolHooks for BitgetHooks {
     fn subscribe_frames(
         &self,
         symbols: &[String],
-        _declared: &DeclaredSet,
+        declared: &DeclaredSet,
     ) -> Vec<Message> {
+        use aetelier_types::config::markets::market_config::DeclaredDatatype as DD;
         let mut args = Vec::with_capacity(symbols.len() * 2);
         for s in symbols {
-            args.push(serde_json::json!({
-                "instType": INST_TYPE, "channel": BOOK_CHANNEL, "instId": s
-            }));
-            args.push(serde_json::json!({
-                "instType": INST_TYPE, "channel": "trade", "instId": s
-            }));
+            if declared.contains(DD::Orderbook) {
+                args.push(serde_json::json!({
+                    "instType": INST_TYPE, "channel": BOOK_CHANNEL, "instId": s
+                }));
+            }
+            if declared.contains(DD::Trades) {
+                args.push(serde_json::json!({
+                    "instType": INST_TYPE, "channel": "trade", "instId": s
+                }));
+            }
+        }
+        if args.is_empty() {
+            return Vec::new();
         }
         let frame = serde_json::json!({ "op": "subscribe", "args": args });
         vec![Message::Text(frame.to_string().into())]
@@ -276,6 +284,21 @@ impl ExchangeAdapter for BitgetAdapter {
             DEFAULT_RAW_BUFFER,
             metrics,
         ))
+    }
+
+    fn subscribe_frames_preview(
+        &self,
+        symbols: &[String],
+        declared: &crate::framework::protocol::DeclaredSet,
+    ) -> Vec<String> {
+        BitgetHooks
+            .subscribe_frames(symbols, declared)
+            .into_iter()
+            .filter_map(|m| match m {
+                Message::Text(t) => Some(t.to_string()),
+                _ => None,
+            })
+            .collect()
     }
 
     fn replay_frame(

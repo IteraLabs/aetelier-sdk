@@ -58,16 +58,24 @@ impl ProtocolHooks for UpbitHooks {
     fn subscribe_frames(
         &self,
         symbols: &[String],
-        _declared: &DeclaredSet,
+        declared: &DeclaredSet,
     ) -> Vec<Message> {
+        use aetelier_types::config::markets::market_config::DeclaredDatatype as DD;
         let codes: Vec<&String> = symbols.iter().collect();
-        let frame = serde_json::json!([
-            { "ticket": "aetelier-ingest" },
-            { "type": "orderbook", "codes": codes },
-            { "type": "trade", "codes": codes },
-            { "format": "DEFAULT" },
-        ]);
-        vec![Message::Text(frame.to_string().into())]
+        let mut parts = vec![serde_json::json!({ "ticket": "aetelier-ingest" })];
+        if declared.contains(DD::Orderbook) {
+            parts.push(serde_json::json!({ "type": "orderbook", "codes": codes }));
+        }
+        if declared.contains(DD::Trades) {
+            parts.push(serde_json::json!({ "type": "trade", "codes": codes }));
+        }
+        if parts.len() == 1 {
+            return Vec::new();
+        }
+        parts.push(serde_json::json!({ "format": "DEFAULT" }));
+        vec![Message::Text(
+            serde_json::Value::Array(parts).to_string().into(),
+        )]
     }
 
     fn heartbeat(&self) -> Heartbeat {
@@ -226,6 +234,21 @@ impl ExchangeAdapter for UpbitAdapter {
             DEFAULT_RAW_BUFFER,
             metrics,
         ))
+    }
+
+    fn subscribe_frames_preview(
+        &self,
+        symbols: &[String],
+        declared: &crate::framework::protocol::DeclaredSet,
+    ) -> Vec<String> {
+        UpbitHooks
+            .subscribe_frames(symbols, declared)
+            .into_iter()
+            .filter_map(|m| match m {
+                Message::Text(t) => Some(t.to_string()),
+                _ => None,
+            })
+            .collect()
     }
 
     fn replay_frame(

@@ -857,18 +857,205 @@ fn book_runtime_replay(desc: &VenueConformance) -> Outcome {
     })
 }
 
+fn canon_frame(raw: &str) -> Option<serde_json::Value> {
+    fn strip(v: &mut serde_json::Value) {
+        match v {
+            serde_json::Value::Object(m) => {
+                m.remove("time");
+                for x in m.values_mut() {
+                    strip(x);
+                }
+            }
+            serde_json::Value::Array(a) => {
+                for x in a.iter_mut() {
+                    strip(x);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut v: serde_json::Value = serde_json::from_str(raw).ok()?;
+    strip(&mut v);
+    Some(v)
+}
+
+fn run_fixture_runtime(
+    desc: &VenueConformance,
+    declared: aetelier_connect::framework::protocol::DeclaredSet,
+) -> Result<
+    (
+        u64,
+        u64,
+        aetelier_connect::framework::runtime::RuntimeOutcome,
+    ),
+    Outcome,
+> {
+    use aetelier_connect::framework::budget::SourceMetrics;
+    use aetelier_connect::framework::rest::RestSnapshot;
+    use aetelier_connect::framework::runtime::{ReconstructedEvent, SourceRuntime};
+
+    let adapter = *registry().get(desc.venue).unwrap();
+    let model = adapter.book_model("orders");
+    let events = replay_all(desc).map_err(Outcome::Fail)?;
+
+    struct FixedSeeder2(NormalizedDelta);
+
+    #[async_trait::async_trait]
+    impl RestSnapshot for FixedSeeder2 {
+        async fn fetch_snapshot(
+            &self,
+            _symbol: &str,
+        ) -> Result<NormalizedDelta, aetelier_connect::errors::ExchangeError> {
+            Ok(self.0.clone())
+        }
+    }
+
+    let seeder: Option<std::sync::Arc<dyn RestSnapshot>> = match desc.rest_fixture {
+        Some(rest_rel) if model.needs_rest() => {
+            let raw = fixture_raw(rest_rel).map_err(Outcome::Fail)?;
+            match adapter.replay_seed(&raw, desc.wire_symbol) {
+                Ok(Some(seed)) => Some(std::sync::Arc::new(FixedSeeder2(seed))),
+                Ok(None) => None,
+                Err(e) => return Err(Outcome::Fail(format!("seed parse failed: {e}"))),
+            }
+        }
+        _ => None,
+    };
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .map_err(|e| Outcome::Fail(format!("tokio runtime: {e}")))?;
+    rt.block_on(async move {
+        let metrics = SourceMetrics::default();
+        let runtime = SourceRuntime::new(
+            desc.venue,
+            adapter.profile().symbol_codec.clone(),
+            vec![desc.wire_symbol.to_string()],
+            model.clone(),
+            model.recovery_action(),
+            metrics.clone(),
+            declared,
+        );
+        let (ev_tx, ev_rx) = tokio::sync::mpsc::channel(events.len() + 1);
+        for ev in events {
+            if ev_tx.send(ev).await.is_err() {
+                return Err(Outcome::Fail("runtime event channel closed early".into()));
+            }
+        }
+        drop(ev_tx);
+        let (out_tx, mut out_rx) = tokio::sync::mpsc::channel(4096);
+        let (_sd_tx, sd_rx) = tokio::sync::watch::channel(false);
+        let run = tokio::spawn(runtime.run(ev_rx, seeder, out_tx, sd_rx));
+        let mut books = 0u64;
+        let mut trades = 0u64;
+        while let Some(ev) = out_rx.recv().await {
+            match ev {
+                ReconstructedEvent::Book { .. } => books += 1,
+                ReconstructedEvent::Trade(_) => trades += 1,
+            }
+        }
+        let outcome = run
+            .await
+            .map_err(|e| Outcome::Fail(format!("runtime task panicked: {e}")))?;
+        Ok((books, trades, outcome))
+    })
+}
+
 fn datatype_isolation(desc: &VenueConformance) -> Outcome {
+    use aetelier_connect::framework::protocol::{DeclaredDatatype, DeclaredSet};
     if !desc.datatype_isolation_done {
         return Outcome::NotApplicable(
             "declared-datatype subscribe filtering (C1) not yet enforced for this venue"
                 .into(),
         );
     }
-    Outcome::Fail(
-        "datatype_isolation_done flipped but the C1 assertions are not wired yet — \
-         implement the declared-set subscribe/runtime checks before flipping"
-            .into(),
-    )
+    let adapter = *registry().get(desc.venue).unwrap();
+    let symbols = vec![desc.wire_symbol.to_string()];
+    let canon_all = |frames: Vec<String>| -> Result<Vec<serde_json::Value>, Outcome> {
+        frames
+            .into_iter()
+            .map(|f| {
+                canon_frame(&f).ok_or_else(|| {
+                    Outcome::Fail(format!("unparseable subscribe frame: {f}"))
+                })
+            })
+            .collect()
+    };
+
+    let full = match canon_all(
+        adapter.subscribe_frames_preview(&symbols, &DeclaredSet::all()),
+    ) {
+        Ok(v) => v,
+        Err(o) => return o,
+    };
+    if full.is_empty() {
+        return Outcome::Fail(
+            "subscribe_frames_preview returned nothing for the full declared set".into(),
+        );
+    }
+
+    let mut supported = Vec::new();
+    for dt in DeclaredDatatype::ALL {
+        let only = match canon_all(
+            adapter.subscribe_frames_preview(&symbols, &DeclaredSet::only(dt)),
+        ) {
+            Ok(v) => v,
+            Err(o) => return o,
+        };
+        let without = match canon_all(
+            adapter.subscribe_frames_preview(&symbols, &DeclaredSet::all().without(dt)),
+        ) {
+            Ok(v) => v,
+            Err(o) => return o,
+        };
+        for f in &only {
+            if without.contains(f) {
+                return Outcome::Fail(format!(
+                    "a frame exclusive to {dt:?} is still subscribed when {dt:?} is disabled: {f}"
+                ));
+            }
+        }
+        if !only.is_empty() {
+            supported.push(dt);
+        }
+    }
+    for must in [DeclaredDatatype::Orderbook, DeclaredDatatype::Trades] {
+        if !supported.contains(&must) {
+            return Outcome::Fail(format!(
+                "venue must expose a {must:?}-only subscription, preview produced none"
+            ));
+        }
+    }
+
+    match run_fixture_runtime(desc, DeclaredSet::only(DeclaredDatatype::Orderbook)) {
+        Ok((_books, trades, _)) if trades == 0 => {}
+        Ok((_, trades, _)) => {
+            return Outcome::Fail(format!(
+                "orderbook-only runtime still emitted {trades} trades"
+            ));
+        }
+        Err(o) => return o,
+    }
+    match run_fixture_runtime(desc, DeclaredSet::only(DeclaredDatatype::Trades)) {
+        Ok((books, _trades, outcome)) => {
+            if books != 0 {
+                return Outcome::Fail(format!(
+                    "trades-only runtime still emitted {books} books"
+                ));
+            }
+            if !matches!(
+                outcome,
+                aetelier_connect::framework::runtime::RuntimeOutcome::Finished
+            ) {
+                return Outcome::Fail(format!(
+                    "trades-only runtime must finish clean (no seed machinery), got {outcome:?}"
+                ));
+            }
+        }
+        Err(o) => return o,
+    }
+    Outcome::Pass
 }
 
 /// The kinds registry. Adding an entry here ratchets the kind to every venue

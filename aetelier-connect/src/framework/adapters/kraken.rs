@@ -52,24 +52,29 @@ impl ProtocolHooks for KrakenHooks {
     fn subscribe_frames(
         &self,
         symbols: &[String],
-        _declared: &DeclaredSet,
+        declared: &DeclaredSet,
     ) -> Vec<Message> {
-        let book = serde_json::json!({
-            // `depth: 10` pins Kraken's returned book to the top-10 window that
-            // `ReconstructionModel::ChecksumDelta { KrakenTop10 }` validates via
-            // CRC32 — without it Kraken defaults to a wider book and the checksum
-            // never matches. Mirrors the legacy `KrakenWssClient` depth param.
-            "method": "subscribe",
-            "params": { "channel": "book", "symbol": symbols, "depth": 10 },
-        });
-        let trade = serde_json::json!({
-            "method": "subscribe",
-            "params": { "channel": "trade", "symbol": symbols },
-        });
-        vec![
-            Message::Text(book.to_string().into()),
-            Message::Text(trade.to_string().into()),
-        ]
+        use aetelier_types::config::markets::market_config::DeclaredDatatype as DD;
+        let mut frames = Vec::with_capacity(2);
+        if declared.contains(DD::Orderbook) {
+            let book = serde_json::json!({
+                // `depth: 10` pins Kraken's returned book to the top-10 window that
+                // `ReconstructionModel::ChecksumDelta { KrakenTop10 }` validates via
+                // CRC32 — without it Kraken defaults to a wider book and the checksum
+                // never matches. Mirrors the legacy `KrakenWssClient` depth param.
+                "method": "subscribe",
+                "params": { "channel": "book", "symbol": symbols, "depth": 10 },
+            });
+            frames.push(Message::Text(book.to_string().into()));
+        }
+        if declared.contains(DD::Trades) {
+            let trade = serde_json::json!({
+                "method": "subscribe",
+                "params": { "channel": "trade", "symbol": symbols },
+            });
+            frames.push(Message::Text(trade.to_string().into()));
+        }
+        frames
     }
 
     /// Kraken server-heartbeats (`{"channel":"heartbeat"}` ~1/s, swallowed by
@@ -222,6 +227,21 @@ impl ExchangeAdapter for KrakenAdapter {
             DEFAULT_RAW_BUFFER,
             metrics,
         ))
+    }
+
+    fn subscribe_frames_preview(
+        &self,
+        symbols: &[String],
+        declared: &crate::framework::protocol::DeclaredSet,
+    ) -> Vec<String> {
+        KrakenHooks
+            .subscribe_frames(symbols, declared)
+            .into_iter()
+            .filter_map(|m| match m {
+                Message::Text(t) => Some(t.to_string()),
+                _ => None,
+            })
+            .collect()
     }
 
     fn replay_frame(

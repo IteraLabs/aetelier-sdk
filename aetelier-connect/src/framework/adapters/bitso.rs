@@ -45,20 +45,25 @@ impl ProtocolHooks for BitsoHooks {
     fn subscribe_frames(
         &self,
         symbols: &[String],
-        _declared: &DeclaredSet,
+        declared: &DeclaredSet,
     ) -> Vec<Message> {
+        use aetelier_types::config::markets::market_config::DeclaredDatatype as DD;
         let mut frames = Vec::with_capacity(symbols.len() * 2);
         for s in symbols {
-            frames.push(Message::Text(
-                serde_json::json!({ "action": "subscribe", "book": s, "type": "diff-orders" })
-                    .to_string()
-                    .into(),
-            ));
-            frames.push(Message::Text(
-                serde_json::json!({ "action": "subscribe", "book": s, "type": "trades" })
-                    .to_string()
-                    .into(),
-            ));
+            if declared.contains(DD::Orderbook) {
+                frames.push(Message::Text(
+                    serde_json::json!({ "action": "subscribe", "book": s, "type": "diff-orders" })
+                        .to_string()
+                        .into(),
+                ));
+            }
+            if declared.contains(DD::Trades) {
+                frames.push(Message::Text(
+                    serde_json::json!({ "action": "subscribe", "book": s, "type": "trades" })
+                        .to_string()
+                        .into(),
+                ));
+            }
         }
         frames
     }
@@ -275,6 +280,21 @@ impl ExchangeAdapter for BitsoAdapter {
             DEFAULT_RAW_BUFFER,
             metrics,
         ))
+    }
+
+    fn subscribe_frames_preview(
+        &self,
+        symbols: &[String],
+        declared: &crate::framework::protocol::DeclaredSet,
+    ) -> Vec<String> {
+        BitsoHooks
+            .subscribe_frames(symbols, declared)
+            .into_iter()
+            .filter_map(|m| match m {
+                Message::Text(t) => Some(t.to_string()),
+                _ => None,
+            })
+            .collect()
     }
 
     fn replay_frame(

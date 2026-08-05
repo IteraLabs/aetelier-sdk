@@ -68,6 +68,7 @@ fn symbol_from_channel(ch: &str) -> Option<&str> {
 
 pub struct HtxHooks {
     symbols: Vec<String>,
+    declared: DeclaredSet,
 }
 
 impl HtxHooks {
@@ -75,7 +76,15 @@ impl HtxHooks {
     /// symbol in `prepare`). Public so capture tooling can drive the same
     /// protocol the runtime uses.
     pub fn new(symbols: Vec<String>) -> Self {
-        Self { symbols }
+        Self {
+            symbols,
+            declared: DeclaredSet::all(),
+        }
+    }
+
+    pub fn with_declared(mut self, declared: DeclaredSet) -> Self {
+        self.declared = declared;
+        self
     }
 }
 
@@ -89,20 +98,25 @@ impl ProtocolHooks for HtxHooks {
     fn subscribe_frames(
         &self,
         symbols: &[String],
-        _declared: &DeclaredSet,
+        declared: &DeclaredSet,
     ) -> Vec<Message> {
+        use aetelier_types::config::markets::market_config::DeclaredDatatype as DD;
         let mut frames = Vec::with_capacity(symbols.len() * 2);
         for s in symbols {
-            frames.push(Message::Text(
-                serde_json::json!({ "sub": mbp_channel(s), "id": format!("mbp-{s}") })
-                    .to_string()
-                    .into(),
-            ));
-            frames.push(Message::Text(
-                serde_json::json!({ "sub": trade_channel(s), "id": format!("trd-{s}") })
-                    .to_string()
-                    .into(),
-            ));
+            if declared.contains(DD::Orderbook) {
+                frames.push(Message::Text(
+                    serde_json::json!({ "sub": mbp_channel(s), "id": format!("mbp-{s}") })
+                        .to_string()
+                        .into(),
+                ));
+            }
+            if declared.contains(DD::Trades) {
+                frames.push(Message::Text(
+                    serde_json::json!({ "sub": trade_channel(s), "id": format!("trd-{s}") })
+                        .to_string()
+                        .into(),
+                ));
+            }
         }
         frames
     }
@@ -128,6 +142,10 @@ impl ProtocolHooks for HtxHooks {
 
     /// In-band seed: one REQ per symbol, appended after the subscribe frames.
     async fn prepare(&self) -> Result<Prepared, ExchangeError> {
+        use aetelier_types::config::markets::market_config::DeclaredDatatype as DD;
+        if !self.declared.contains(DD::Orderbook) {
+            return Ok(Prepared::default());
+        }
         let extra_frames = self
             .symbols
             .iter()
@@ -310,9 +328,8 @@ impl ExchangeAdapter for HtxAdapter {
         shutdown: watch::Receiver<bool>,
         metrics: SourceMetrics,
     ) -> JoinHandle<TaskExit> {
-        let hooks = Arc::new(HtxHooks {
-            symbols: symbols.clone(),
-        });
+        let hooks =
+            Arc::new(HtxHooks::new(symbols.clone()).with_declared(declared.clone()));
         tokio::spawn(drive::<HtxHooks, HtxDecoder, HtxNormalizer>(
             hooks,
             symbols,
@@ -325,6 +342,22 @@ impl ExchangeAdapter for HtxAdapter {
             DEFAULT_RAW_BUFFER,
             metrics,
         ))
+    }
+
+    fn subscribe_frames_preview(
+        &self,
+        symbols: &[String],
+        declared: &crate::framework::protocol::DeclaredSet,
+    ) -> Vec<String> {
+        HtxHooks::new(symbols.to_vec())
+            .with_declared(declared.clone())
+            .subscribe_frames(symbols, declared)
+            .into_iter()
+            .filter_map(|m| match m {
+                Message::Text(t) => Some(t.to_string()),
+                _ => None,
+            })
+            .collect()
     }
 
     fn replay_frame(
@@ -400,7 +433,7 @@ mod tests {
 
     #[test]
     fn on_inbound_control_echoes_ping_as_pong() {
-        let hooks = HtxHooks { symbols: vec![] };
+        let hooks = HtxHooks::new(vec![]);
         match hooks.on_inbound_control(r#"{"ping":1700000000000}"#) {
             ControlAction::Reply(Message::Text(body)) => {
                 let v: serde_json::Value = serde_json::from_str(&body).unwrap();
@@ -416,10 +449,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn prepare_emits_one_req_seed_per_symbol() {
-        let hooks = HtxHooks {
-            symbols: vec!["btcusdt".into(), "ethusdt".into()],
+    async fn prepare_skips_the_req_seed_when_orderbook_is_undeclared() {
+        use aetelier_types::config::markets::market_config::{
+            DeclaredDatatype, DeclaredSet,
         };
+        let hooks = HtxHooks::new(vec!["btcusdt".into()])
+            .with_declared(DeclaredSet::only(DeclaredDatatype::Trades));
+        let prepared = hooks.prepare().await.unwrap();
+        assert!(
+            prepared.extra_frames.is_empty(),
+            "a trades-only collector must not request the mbp snapshot"
+        );
+        assert_eq!(prepared.extra_frames_delay, None);
+    }
+
+    #[tokio::test]
+    async fn prepare_emits_one_req_seed_per_symbol() {
+        let hooks = HtxHooks::new(vec!["btcusdt".into(), "ethusdt".into()]);
         let prepared = hooks.prepare().await.unwrap();
         assert_eq!(prepared.extra_frames.len(), 2);
         assert_eq!(
@@ -436,7 +482,7 @@ mod tests {
 
     #[test]
     fn frame_codec_is_gzip() {
-        assert_eq!(HtxHooks { symbols: vec![] }.frame_codec(), FrameCodec::Gzip);
+        assert_eq!(HtxHooks::new(vec![]).frame_codec(), FrameCodec::Gzip);
     }
 
     #[test]

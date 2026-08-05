@@ -505,7 +505,10 @@ impl ExchangeAdapter for CoinbaseAdapter {
         // the sibling is aborted so the worker's reconnect loop restarts BOTH
         // (they re-seed together); on graceful shutdown the sibling is awaited
         // so its bounded drain is not cut short.
-        let mut book =
+        use aetelier_types::config::markets::market_config::DeclaredDatatype as DD;
+        let want_book = declared.contains(DD::Orderbook);
+        let want_trades = declared.contains(DD::Trades);
+        let spawn_book = || {
             tokio::spawn(drive::<CoinbaseHooks, CoinbaseDecoder, CoinbaseNormalizer>(
                 Arc::new(CoinbaseHooks::level2()),
                 symbols.clone(),
@@ -515,18 +518,30 @@ impl ExchangeAdapter for CoinbaseAdapter {
                 shutdown.clone(),
                 DEFAULT_RAW_BUFFER,
                 metrics.clone(),
-            ));
-        let mut trades =
+            ))
+        };
+        let spawn_trades = || {
             tokio::spawn(drive::<CoinbaseHooks, CoinbaseDecoder, CoinbaseNormalizer>(
                 Arc::new(CoinbaseHooks::trades()),
-                symbols,
-                declared,
+                symbols.clone(),
+                declared.clone(),
                 CoinbaseNormalizer::passthrough(metrics.clone()),
-                tx,
+                tx.clone(),
                 shutdown.clone(),
                 DEFAULT_RAW_BUFFER,
-                metrics,
-            ));
+                metrics.clone(),
+            ))
+        };
+        match (want_book, want_trades) {
+            (true, false) => return spawn_book(),
+            (false, true) => return spawn_trades(),
+            (false, false) => {
+                return tokio::spawn(async move { TaskExit::Completed });
+            }
+            (true, true) => {}
+        }
+        let mut book = spawn_book();
+        let mut trades = spawn_trades();
         tokio::spawn(async move {
             let panicked = || {
                 TaskExit::Failed(DisconnectReason::TransportError {
@@ -550,6 +565,36 @@ impl ExchangeAdapter for CoinbaseAdapter {
                 first.unwrap_or_else(|_| panicked())
             }
         })
+    }
+
+    fn subscribe_frames_preview(
+        &self,
+        symbols: &[String],
+        declared: &crate::framework::protocol::DeclaredSet,
+    ) -> Vec<String> {
+        use aetelier_types::config::markets::market_config::DeclaredDatatype as DD;
+        let mut out = Vec::new();
+        let text = |m: Message| match m {
+            Message::Text(t) => Some(t.to_string()),
+            _ => None,
+        };
+        if declared.contains(DD::Orderbook) {
+            out.extend(
+                CoinbaseHooks::level2()
+                    .subscribe_frames(symbols, declared)
+                    .into_iter()
+                    .filter_map(text),
+            );
+        }
+        if declared.contains(DD::Trades) {
+            out.extend(
+                CoinbaseHooks::trades()
+                    .subscribe_frames(symbols, declared)
+                    .into_iter()
+                    .filter_map(text),
+            );
+        }
+        out
     }
 
     fn replay_frame(

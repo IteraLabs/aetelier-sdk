@@ -88,6 +88,14 @@ pub trait ExchangeAdapter: Send + Sync + 'static {
     /// heartbeat / non-data frame). The default reports the venue as not yet
     /// offline-replayable; each adapter overrides it during its conformance
     /// cycle.
+    fn subscribe_frames_preview(
+        &self,
+        _symbols: &[String],
+        _declared: &aetelier_types::config::markets::market_config::DeclaredSet,
+    ) -> Vec<String> {
+        Vec::new()
+    }
+
     fn replay_frame(
         &self,
         _raw: &str,

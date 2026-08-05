@@ -65,22 +65,27 @@ impl ProtocolHooks for PoloniexHooks {
     fn subscribe_frames(
         &self,
         symbols: &[String],
-        _declared: &DeclaredSet,
+        declared: &DeclaredSet,
     ) -> Vec<Message> {
-        let book = serde_json::json!({
-            "event": "subscribe",
-            "channel": ["book_lv2"],
-            "symbols": symbols,
-        });
-        let trades = serde_json::json!({
-            "event": "subscribe",
-            "channel": ["trades"],
-            "symbols": symbols,
-        });
-        vec![
-            Message::Text(book.to_string().into()),
-            Message::Text(trades.to_string().into()),
-        ]
+        use aetelier_types::config::markets::market_config::DeclaredDatatype as DD;
+        let mut frames = Vec::with_capacity(2);
+        if declared.contains(DD::Orderbook) {
+            let book = serde_json::json!({
+                "event": "subscribe",
+                "channel": ["book_lv2"],
+                "symbols": symbols,
+            });
+            frames.push(Message::Text(book.to_string().into()));
+        }
+        if declared.contains(DD::Trades) {
+            let trades = serde_json::json!({
+                "event": "subscribe",
+                "channel": ["trades"],
+                "symbols": symbols,
+            });
+            frames.push(Message::Text(trades.to_string().into()));
+        }
+        frames
     }
 
     /// Client-driven application ping: `{"event":"ping"}` every 25s. The server
@@ -258,6 +263,21 @@ impl ExchangeAdapter for PoloniexAdapter {
             DEFAULT_RAW_BUFFER,
             metrics,
         ))
+    }
+
+    fn subscribe_frames_preview(
+        &self,
+        symbols: &[String],
+        declared: &crate::framework::protocol::DeclaredSet,
+    ) -> Vec<String> {
+        PoloniexHooks
+            .subscribe_frames(symbols, declared)
+            .into_iter()
+            .filter_map(|m| match m {
+                Message::Text(t) => Some(t.to_string()),
+                _ => None,
+            })
+            .collect()
     }
 
     fn replay_frame(

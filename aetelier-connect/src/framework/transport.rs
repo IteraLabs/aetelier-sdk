@@ -493,7 +493,7 @@ mod tests {
 
     #[tokio::test]
     async fn delayed_extra_frames_trail_the_subscribe() {
-        use futures_util::{SinkExt as _, StreamExt as _};
+        use futures_util::StreamExt as _;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let (seen_tx, mut seen_rx) = mpsc::channel::<(String, std::time::Instant)>(8);
