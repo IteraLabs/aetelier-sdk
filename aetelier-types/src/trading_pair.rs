@@ -118,7 +118,19 @@ impl TradingPair {
                 Self::from_concatenated(raw)
             }
             Exchange::Upbit => Self::from_quote_first_hyphen(raw),
+            Exchange::Hyperliquid => Self::from_bare_coin(raw),
         }
+    }
+
+    fn from_bare_coin(raw: &str) -> Option<Self> {
+        let coin = raw.trim();
+        if coin.is_empty() || coin.contains([':', '@', '/', '-', '_']) {
+            return None;
+        }
+        Some(Self {
+            base: coin.to_uppercase(),
+            quote: "USDC".to_string(),
+        })
     }
 
     /// Parse a quote-first hyphen symbol (`"KRW-BTC"` → base `BTC`, quote `KRW`).
@@ -224,6 +236,7 @@ impl TradingPair {
             Exchange::Bitget => format!("{}{}", self.base, self.quote),
             // Upbit lists the quote currency first (`KRW-BTC`).
             Exchange::Upbit => format!("{}-{}", self.quote, self.base),
+            Exchange::Hyperliquid => self.base.clone(),
         }
     }
 
@@ -665,6 +678,34 @@ mod tests {
         // Bitget: concatenated.
         let p = TradingPair::from_exchange_symbol("BTCUSDT", Exchange::Bitget).unwrap();
         assert_eq!((p.base(), p.quote()), ("BTC", "USDT"));
+    }
+
+    #[test]
+    fn from_exchange_symbol_hyperliquid_bare_coin_is_usdc_margined() {
+        let p = TradingPair::from_exchange_symbol("BTC", Exchange::Hyperliquid).unwrap();
+        assert_eq!((p.base(), p.quote()), ("BTC", "USDC"));
+        assert_eq!(p.to_exchange_symbol(Exchange::Hyperliquid), "BTC");
+        let p =
+            TradingPair::from_exchange_symbol("kPEPE", Exchange::Hyperliquid).unwrap();
+        assert_eq!((p.base(), p.quote()), ("KPEPE", "USDC"));
+    }
+
+    #[test]
+    fn from_exchange_symbol_hyperliquid_rejects_non_default_dex_and_spot_forms() {
+        for raw in [
+            "xyz:XYZ100",
+            "@107",
+            "PURR/USDC",
+            "BTC-USDC",
+            "BTC_USDC",
+            "",
+        ] {
+            assert_eq!(
+                TradingPair::from_exchange_symbol(raw, Exchange::Hyperliquid),
+                None,
+                "{raw:?} must be rejected"
+            );
+        }
     }
 
     #[test]

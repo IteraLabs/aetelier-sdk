@@ -1029,7 +1029,7 @@ fn datatype_isolation(desc: &VenueConformance) -> Outcome {
     }
 
     match run_fixture_runtime(desc, DeclaredSet::only(DeclaredDatatype::Orderbook)) {
-        Ok((_books, trades, _)) if trades == 0 => {}
+        Ok((_books, 0, _)) => {}
         Ok((_, trades, _)) => {
             return Outcome::Fail(format!(
                 "orderbook-only runtime still emitted {trades} trades"

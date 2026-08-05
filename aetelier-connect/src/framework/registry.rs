@@ -146,6 +146,7 @@ fn register_all() -> Vec<&'static dyn ExchangeAdapter> {
         &super::adapters::gateio::GATEIO,
         &super::adapters::bitget::BITGET,
         &super::adapters::poloniex::POLONIEX,
+        &super::adapters::hyperliquid::HYPERLIQUID,
     ]
 }
 
@@ -180,10 +181,21 @@ mod tests {
     /// All twelve venues are compiled in and self-describe a stable id matching
     /// their registry key.
     #[test]
-    fn all_twelve_venues_register_and_resolve() {
+    fn all_thirteen_venues_register_and_resolve() {
         let ids = [
-            "binance", "okx", "upbit", "htx", "kucoin", "bitso", "bybit", "coinbase",
-            "kraken", "gateio", "bitget", "poloniex",
+            "binance",
+            "okx",
+            "upbit",
+            "htx",
+            "kucoin",
+            "bitso",
+            "bybit",
+            "coinbase",
+            "kraken",
+            "gateio",
+            "bitget",
+            "poloniex",
+            "hyperliquid",
         ];
         let reg = registry();
         assert_eq!(reg.len(), ids.len());

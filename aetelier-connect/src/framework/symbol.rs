@@ -7,15 +7,24 @@ use aetelier_types::trading_pair::TradingPair;
 #[derive(Debug, Clone)]
 pub enum SymbolCodec {
     /// `BTCUSDT` (Binance/Bybit/Bitget); `upper` controls case (HTX = false).
-    Concat { upper: bool },
+    Concat {
+        upper: bool,
+    },
     /// `BTC-USDT` (Coinbase/OKX/KuCoin), base first.
     Hyphen,
     /// `BTC/USDT` (Kraken).
     Slash,
     /// `BTC_USDT` (Gate.io/Poloniex/Bitso); `upper` controls case.
-    Underscore { upper: bool },
+    Underscore {
+        upper: bool,
+    },
     /// `KRW-BTC` (Upbit), quote first.
-    QuoteFirst { sep: char },
+    QuoteFirst {
+        sep: char,
+    },
+    BareCoin {
+        quote: &'static str,
+    },
 }
 
 impl SymbolCodec {
@@ -28,6 +37,7 @@ impl SymbolCodec {
             SymbolCodec::Slash => format!("{b}/{q}"),
             SymbolCodec::Underscore { upper } => Self::case(format!("{b}_{q}"), *upper),
             SymbolCodec::QuoteFirst { sep } => format!("{q}{sep}{b}"),
+            SymbolCodec::BareCoin { .. } => b.to_string(),
         }
     }
 
@@ -47,6 +57,12 @@ impl SymbolCodec {
             }
             // No separator → suffix-match the known-quote table.
             SymbolCodec::Concat { .. } => return TradingPair::from_concatenated(&up),
+            SymbolCodec::BareCoin { quote } => {
+                if up.is_empty() || up.contains([':', '@', '/', '-', '_']) {
+                    return None;
+                }
+                (up.as_str(), *quote)
+            }
         };
         Some(TradingPair::new(base, quote))
     }
@@ -104,5 +120,22 @@ mod tests {
             SymbolCodec::Concat { upper: false }.decode("btcusdt"),
             Some(pair)
         );
+    }
+
+    #[test]
+    fn bare_coin_maps_to_fixed_quote_and_rejects_non_default_dex() {
+        let codec = SymbolCodec::BareCoin { quote: "USDC" };
+        assert_eq!(codec.decode("BTC"), Some(TradingPair::new("BTC", "USDC")));
+        assert_eq!(codec.encode(&TradingPair::new("BTC", "USDC")), "BTC");
+        for raw in [
+            "xyz:XYZ100",
+            "@107",
+            "PURR/USDC",
+            "BTC-USDC",
+            "BTC_USDC",
+            "",
+        ] {
+            assert_eq!(codec.decode(raw), None, "{raw:?} must be rejected");
+        }
     }
 }

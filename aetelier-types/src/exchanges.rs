@@ -91,6 +91,7 @@ pub enum Exchange {
     Bitget,
     /// Bitso (LatAm) spot exchange — underscore lowercase symbols (`btc_mxn`).
     Bitso,
+    Hyperliquid,
 }
 
 impl fmt::Display for Exchange {
@@ -108,6 +109,7 @@ impl fmt::Display for Exchange {
             Exchange::Kucoin => write!(f, "kucoin"),
             Exchange::Bitget => write!(f, "bitget"),
             Exchange::Bitso => write!(f, "bitso"),
+            Exchange::Hyperliquid => write!(f, "hyperliquid"),
         }
     }
 }
@@ -115,7 +117,7 @@ impl fmt::Display for Exchange {
 impl Exchange {
     /// Every supported exchange, in declaration order. The authoritative,
     /// compile-time-exhaustive list of venues the SDK can collect from.
-    pub const fn all() -> [Exchange; 12] {
+    pub const fn all() -> [Exchange; 13] {
         [
             Exchange::Bybit,
             Exchange::Coinbase,
@@ -129,6 +131,7 @@ impl Exchange {
             Exchange::Kucoin,
             Exchange::Bitget,
             Exchange::Bitso,
+            Exchange::Hyperliquid,
         ]
     }
 
@@ -148,6 +151,7 @@ impl Exchange {
             "kucoin" => Some(Exchange::Kucoin),
             "bitget" => Some(Exchange::Bitget),
             "bitso" => Some(Exchange::Bitso),
+            "hyperliquid" => Some(Exchange::Hyperliquid),
             _ => None,
         }
     }
@@ -165,7 +169,7 @@ impl FromStr for Exchange {
 mod tests {
     use super::*;
 
-    const ALL: [(&str, Exchange); 12] = [
+    const ALL: [(&str, Exchange); 13] = [
         ("bybit", Exchange::Bybit),
         ("coinbase", Exchange::Coinbase),
         ("kraken", Exchange::Kraken),
@@ -178,6 +182,7 @@ mod tests {
         ("kucoin", Exchange::Kucoin),
         ("bitget", Exchange::Bitget),
         ("bitso", Exchange::Bitso),
+        ("hyperliquid", Exchange::Hyperliquid),
     ];
 
     #[test]

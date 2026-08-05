@@ -10,6 +10,7 @@ pub mod coinbase;
 pub mod events;
 pub mod gateio;
 pub mod htx;
+pub mod hyperliquid;
 pub mod kraken;
 pub mod kucoin;
 pub mod okx;

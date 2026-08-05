@@ -20,8 +20,9 @@ tests (`tests/sources/`) both read from here.
 Captured live via `examples/capture_fixture` (which drives each adapter's real
 `ProtocolHooks` — endpoint, subscribe frames, heartbeat, frame codec — the same
 path the runtime uses) for the WSS streams, and the venues' REST endpoints for
-the seed snapshots. Symbol is BTC-quoted per venue (Upbit is KRW-BTC). Captured
-2026-07 across the venue conformance cycles.
+the seed snapshots. Symbol is BTC-quoted per venue (Upbit is KRW-BTC;
+Hyperliquid is the bare perp coin `BTC`). Captured 2026-07 across the venue
+conformance cycles; hyperliquid captured 2026-08-05 (cycle #5).
 
 | Venue | File | Kind | Frames | Size |
 |---|---|---|---:|---:|
@@ -36,6 +37,7 @@ the seed snapshots. Symbol is BTC-quoted per venue (Upbit is KRW-BTC). Captured
 | gateio | `gateio/btcusdt_book_trade.jsonl` | WSS book + trade | 400 | 379K |
 | htx | `htx/btcusdt_book_trade.jsonl` | WSS book + trade (gzip, mid-stream REQ seed) | 231 | 127K |
 | htx | `htx/btcusdt_trades_density.jsonl` | trade.detail frames only, selected from a live 600s window (2026-07-16; 50 trades, tradeId dense +1 after per-tick reverse — the loss-accounting density evidence) | 43 | 12K |
+| hyperliquid | `hyperliquid/btc_book_trade.jsonl` | WSS full-book + trade (600s window, captured 2026-08-05; 112 l2Book snapshots all 20×20, 728 trade frames / 1345 prints, sides A:796 B:549; perp `BTC`, decimal-string px/sz) | 861 | 560K |
 | kraken | `kraken/btcusd_book_trade.jsonl` | WSS book + trade | 1800 | 326K |
 | kraken | `kraken/books_btcusd.jsonl` | WSS book (CRC32 reference) | 146 | 27K |
 | kucoin | `kucoin/btcusdt_book_trade.jsonl` | WSS book + trade | 707 | 187K |

@@ -6,9 +6,11 @@
 //! once (add it to `KINDS` and to the macro body); a venue missing a required
 //! fixture fails its kind.
 //!
-//! Venue cycle status: all 12 venues wired and fully DONE — every venue's row is
+//! Venue cycle status: all 13 venues wired and fully DONE — every venue's row is
 //! green across all applicable kinds, which the `conformance_matrix` meta-test
-//! enforces for every `done: true` venue (no Skip, no Fail).
+//! enforces for every `done: true` venue (no Skip, no Fail). Hyperliquid's
+//! stage-1 declared surface is Book + Trade; funding/open-interest extend it in
+//! a later cycle and reopen the venue via the ratchet.
 
 #[path = "conformance/coverage.rs"]
 mod coverage;
@@ -209,6 +211,20 @@ const KUCOIN: VenueConformance = VenueConformance {
     datatype_isolation_done: true,
 };
 
+const HYPERLIQUID: VenueConformance = VenueConformance {
+    venue: "hyperliquid",
+    wire_symbol: "BTC",
+    canonical_base: "BTC",
+    canonical_quote: "USDC",
+    expect_source: ExpectSource::None,
+    expect_needs_rest: false,
+    ws_fixture: "hyperliquid/btc_book_trade.jsonl",
+    rest_fixture: None,
+    expect_classes: &[Class::Book, Class::Trade],
+    done: true,
+    datatype_isolation_done: true,
+};
+
 /// Instantiate every kind in `kinds::KINDS` as a named `#[test]` for one
 /// venue. The body lists each kind once; adding a kind means adding a line
 /// here and its entry in `KINDS` — it then applies to every venue.
@@ -284,12 +300,24 @@ conformance_suite!(upbit, UPBIT);
 conformance_suite!(htx, HTX);
 conformance_suite!(bitso, BITSO);
 conformance_suite!(kucoin, KUCOIN);
+conformance_suite!(hyperliquid, HYPERLIQUID);
 
 // ── Registry of wired venues, for the matrix meta-test ──────────────────────
 
 const WIRED: &[&VenueConformance] = &[
-    &BINANCE, &OKX, &KRAKEN, &COINBASE, &BYBIT, &GATEIO, &BITGET, &POLONIEX, &UPBIT,
-    &HTX, &BITSO, &KUCOIN,
+    &BINANCE,
+    &OKX,
+    &KRAKEN,
+    &COINBASE,
+    &BYBIT,
+    &GATEIO,
+    &BITGET,
+    &POLONIEX,
+    &UPBIT,
+    &HTX,
+    &BITSO,
+    &KUCOIN,
+    &HYPERLIQUID,
 ];
 
 /// Meta-test: emit the kinds x venues coverage matrix and enforce the ratchet
