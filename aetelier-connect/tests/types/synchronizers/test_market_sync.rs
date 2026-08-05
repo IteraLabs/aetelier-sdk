@@ -69,8 +69,13 @@ fn make_liquidation(ts_us: u64, price: f64, amount: f64, side: TradeSide) -> Liq
 fn make_funding(ts_us: u64, rate: f64) -> FundingRate {
     FundingRate {
         funding_rate_ts_us: ts_us,
+        local_funding_ts_us: 0,
+        recv_seq: 0,
+        conn_epoch: 0,
         pair: btcusdt(),
-        funding_rate: rate,
+        funding_rate: f64_to_decimal(rate),
+        premium: None,
+        interval_hours: 8,
         next_funding_ts_us: ts_us + 28_800_000_000,
         exchange: "bybit".to_string(),
     }
@@ -79,9 +84,13 @@ fn make_funding(ts_us: u64, rate: f64) -> FundingRate {
 fn make_oi(ts_us: u64, contracts: f64, value: f64) -> OpenInterest {
     OpenInterest {
         open_interest_ts_us: ts_us,
+        local_oi_ts_us: 0,
+        recv_seq: 0,
+        conn_epoch: 0,
         pair: btcusdt(),
-        open_interest: contracts,
-        open_interest_value: value,
+        open_interest: f64_to_decimal(contracts),
+        open_interest_value: Some(f64_to_decimal(value)),
+        mark_px: None,
         exchange: "bybit".to_string(),
     }
 }

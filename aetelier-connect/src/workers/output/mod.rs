@@ -1158,6 +1158,7 @@ mod tests {
             liquidations: vec![],
             funding_rate: vec![],
             open_interest: vec![],
+            funding_settlements: vec![],
         }
     }
 

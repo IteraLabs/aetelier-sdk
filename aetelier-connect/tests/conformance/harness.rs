@@ -44,6 +44,9 @@ impl ExpectSource {
 pub enum Class {
     Book,
     Trade,
+    FundingRate,
+    OpenInterest,
+    FundingSettlement,
 }
 
 /// Per-venue conformance descriptor. Fixtures + doc-derived expectations only.

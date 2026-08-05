@@ -50,8 +50,12 @@
 //! ```
 
 use aetelier_types::{
-    funding::FundingRate, liquidations::Liquidation, open_interest::OpenInterest,
-    orderbooks::Orderbook, snapshots::MarketSnapshot, trades::Trade,
+    funding::{FundingRate, FundingSettlement},
+    liquidations::Liquidation,
+    open_interest::OpenInterest,
+    orderbooks::Orderbook,
+    snapshots::MarketSnapshot,
+    trades::Trade,
     trading_pair::TradingPair,
 };
 
@@ -72,6 +76,7 @@ struct PeriodEvents {
     liquidations: Vec<Liquidation>,
     funding: Vec<FundingRate>,
     open_interest: Vec<OpenInterest>,
+    funding_settlements: Vec<FundingSettlement>,
 }
 
 /// The grid clock mode — single definition in `aetelier_types` (the
@@ -128,6 +133,7 @@ pub struct MarketSynchronizer {
 
     /// Most recent funding rates (state-based, carried forward).
     current_funding_rates: Vec<FundingRate>,
+    current_funding_settlements: Vec<FundingSettlement>,
 
     /// Most recent open interest records (state-based, carried forward).
     current_open_interests: Vec<OpenInterest>,
@@ -173,6 +179,7 @@ impl MarketSynchronizer {
             current_trades: Vec::new(),
             current_liquidations: Vec::new(),
             current_funding_rates: Vec::new(),
+            current_funding_settlements: Vec::new(),
             current_open_interests: Vec::new(),
             buffer: Vec::new(),
             total_captured: 0,
@@ -293,7 +300,7 @@ impl MarketSynchronizer {
             }
         }
         for fr in std::mem::take(&mut self.current_funding_rates) {
-            let row = fr.funding_rate_ts_us / self.period_us + 1;
+            let row = fr.effective_ts_us() / self.period_us + 1;
             if row <= prev_period {
                 late += 1;
             } else if row <= last_emitted {
@@ -303,13 +310,23 @@ impl MarketSynchronizer {
             }
         }
         for oi in std::mem::take(&mut self.current_open_interests) {
-            let row = oi.open_interest_ts_us / self.period_us + 1;
+            let row = oi.effective_ts_us() / self.period_us + 1;
             if row <= prev_period {
                 late += 1;
             } else if row <= last_emitted {
                 out.entry(row).or_default().open_interest.push(oi);
             } else {
                 self.current_open_interests.push(oi);
+            }
+        }
+        for fs in std::mem::take(&mut self.current_funding_settlements) {
+            let row = fs.funding_time_us / self.period_us + 1;
+            if row <= prev_period {
+                late += 1;
+            } else if row <= last_emitted {
+                out.entry(row).or_default().funding_settlements.push(fs);
+            } else {
+                self.current_funding_settlements.push(fs);
             }
         }
 
@@ -378,6 +395,7 @@ impl MarketSynchronizer {
                 liquidations: bundle.liquidations,
                 funding_rate: bundle.funding,
                 open_interest: bundle.open_interest,
+                funding_settlements: bundle.funding_settlements,
             };
             self.buffer.push(snap);
         }
@@ -505,6 +523,7 @@ impl MarketSynchronizer {
                 liquidations: bundle.liquidations,
                 funding_rate: bundle.funding,
                 open_interest: bundle.open_interest,
+                funding_settlements: bundle.funding_settlements,
             };
             self.buffer.push(snap);
         }
@@ -578,6 +597,14 @@ impl MarketSynchronizer {
         self.current_funding_rates.push(fr);
     }
 
+    pub fn on_funding_settlement(&mut self, fs: FundingSettlement) {
+        if self.finalized {
+            self.drop_post_finalize();
+            return;
+        }
+        self.current_funding_settlements.push(fs);
+    }
+
     /// Feed an open interest update. State-based — latest value is carried forward.
     ///
     /// Open interest never drives the clock, regardless of mode.
@@ -620,6 +647,7 @@ impl MarketSynchronizer {
         let liquidations = std::mem::take(&mut self.current_liquidations);
         let funding_rates = std::mem::take(&mut self.current_funding_rates);
         let open_interests = std::mem::take(&mut self.current_open_interests);
+        let settlements = std::mem::take(&mut self.current_funding_settlements);
 
         for (symbol, period) in periods {
             let ts = (period + 1) * self.period_us;
@@ -633,6 +661,7 @@ impl MarketSynchronizer {
                 liquidations: liquidations.clone(),
                 funding_rate: funding_rates.clone(),
                 open_interest: open_interests.clone(),
+                funding_settlements: settlements.clone(),
             };
 
             self.buffer.push(snap);
@@ -654,6 +683,7 @@ impl MarketSynchronizer {
         let liquidations = std::mem::take(&mut self.current_liquidations);
         let funding_rates = std::mem::take(&mut self.current_funding_rates);
         let open_interests = std::mem::take(&mut self.current_open_interests);
+        let settlements = std::mem::take(&mut self.current_funding_settlements);
 
         let snap = MarketSnapshot {
             ts_us: ts,
@@ -664,6 +694,7 @@ impl MarketSynchronizer {
             liquidations,
             funding_rate: funding_rates,
             open_interest: open_interests,
+            funding_settlements: settlements,
         };
 
         self.buffer.push(snap);

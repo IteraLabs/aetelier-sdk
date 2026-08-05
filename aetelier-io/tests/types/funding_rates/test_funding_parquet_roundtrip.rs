@@ -1,12 +1,3 @@
-//! Parquet round-trip tests for funding rate data.
-//!
-//! Each test constructs `FundingRate` structs with known fields, writes them
-//! to Parquet via `write_funding_parquet`, reads back via
-//! `read_funding_parquet`, and asserts field equality.
-//!
-//! These tests require the `parquet` feature:
-//!   cargo test --features parquet -p aetelier_types test_funding_parquet_roundtrip
-
 #[cfg(test)]
 #[cfg(feature = "parquet")]
 mod tests {
@@ -15,55 +6,45 @@ mod tests {
     };
     use aetelier_types::funding::FundingRate;
     use aetelier_types::trading_pair::TradingPair;
+    use rust_decimal::Decimal;
     use tempfile::tempdir;
 
-    // ── Helpers ──────────────────────────────────────────────────────────
+    fn d(s: &str) -> Decimal {
+        s.parse().unwrap()
+    }
 
-    /// Build a pair of funding rate records for a given exchange/symbol.
     fn make_funding_rates(exchange: &str) -> Vec<FundingRate> {
         let pair = TradingPair::new("BTC", "USDT");
         vec![
             FundingRate {
-                funding_rate_ts_us: 1672304484000,
+                funding_rate_ts_us: 1_672_304_484_000_000,
+                local_funding_ts_us: 1_672_304_484_015_000,
+                recv_seq: 10,
+                conn_epoch: 1,
                 pair: pair.clone(),
-                funding_rate: 0.0001,
-                next_funding_ts_us: 1672308000000,
+                funding_rate: d("0.0001"),
+                premium: Some(d("0.00002")),
+                interval_hours: 8,
+                next_funding_ts_us: 1_672_308_000_000_000,
                 exchange: exchange.to_string(),
             },
             FundingRate {
-                funding_rate_ts_us: 1672308000000,
+                funding_rate_ts_us: 0,
+                local_funding_ts_us: 1_672_308_000_030_000,
+                recv_seq: 11,
+                conn_epoch: 2,
                 pair: pair.clone(),
-                funding_rate: -0.00015,
-                next_funding_ts_us: 1672311600000,
+                funding_rate: d("-0.00015"),
+                premium: None,
+                interval_hours: 1,
+                next_funding_ts_us: 0,
                 exchange: exchange.to_string(),
             },
         ]
     }
 
-    /// Assert a loaded funding rate matches expected values.
-    fn assert_funding(
-        fr: &FundingRate,
-        _symbol: &str,
-        exchange: &str,
-        rate: f64,
-        next_ts: u64,
-    ) {
-        assert_eq!(fr.pair, TradingPair::new("BTC", "USDT"));
-        assert_eq!(fr.exchange, exchange);
-        assert!(
-            (fr.funding_rate - rate).abs() < 1e-8,
-            "expected rate ~{}, got {}",
-            rate,
-            fr.funding_rate,
-        );
-        assert_eq!(fr.next_funding_ts_us, next_ts);
-        assert!(fr.funding_rate_ts_us > 0);
-    }
-
-    // ── Per-exchange round-trip tests ────────────────────────────────────
-
     #[test]
-    fn test_bybit_funding_parquet_roundtrip() {
+    fn roundtrip_preserves_every_field_exactly() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("bybit_funding.parquet");
         let rates = make_funding_rates("bybit");
@@ -72,104 +53,123 @@ mod tests {
         let loaded = read_funding_parquet(&path).unwrap();
 
         assert_eq!(loaded.len(), 2);
-        assert_funding(&loaded[0], "btcusdt", "bybit", 0.0001, 1672308000000);
-        assert_funding(&loaded[1], "btcusdt", "bybit", -0.00015, 1672311600000);
+        assert_eq!(loaded[0].funding_rate_ts_us, 1_672_304_484_000_000);
+        assert_eq!(loaded[0].local_funding_ts_us, 1_672_304_484_015_000);
+        assert_eq!(loaded[0].recv_seq, 10);
+        assert_eq!(loaded[0].conn_epoch, 1);
+        assert_eq!(loaded[0].funding_rate, d("0.0001"));
+        assert_eq!(loaded[0].premium, Some(d("0.00002")));
+        assert_eq!(loaded[0].interval_hours, 8);
+        assert_eq!(loaded[0].next_funding_ts_us, 1_672_308_000_000_000);
+        assert_eq!(loaded[0].pair, TradingPair::new("BTC", "USDT"));
+        assert_eq!(loaded[0].exchange, "bybit");
+
+        assert_eq!(loaded[1].funding_rate_ts_us, 0);
+        assert_eq!(loaded[1].effective_ts_us(), 1_672_308_000_030_000);
+        assert_eq!(loaded[1].funding_rate, d("-0.00015"));
+        assert_eq!(loaded[1].premium, None);
+        assert_eq!(loaded[1].interval_hours, 1);
     }
 
     #[test]
-    fn test_multi_exchange_funding_parquet_roundtrip() {
+    fn negative_rate_precision_survives() {
         let dir = tempdir().unwrap();
-
-        let exchanges = [
-            ("btcusdt", "bybit"),
-            ("btcusd", "coinbase"),
-            ("btcusd", "kraken"),
-        ];
-
-        for (symbol, exchange) in &exchanges {
-            let path = dir.path().join(format!("{}_funding.parquet", exchange));
-            let rates = make_funding_rates(exchange);
-
-            write_funding_parquet(&rates, &path).unwrap();
-            let loaded = read_funding_parquet(&path).unwrap();
-
-            assert_eq!(loaded.len(), 2);
-            assert_funding(&loaded[0], symbol, exchange, 0.0001, 1672308000000);
-            assert_funding(&loaded[1], symbol, exchange, -0.00015, 1672311600000);
-        }
-    }
-
-    // ── Negative funding rate precision ──────────────────────────────────
-
-    #[test]
-    fn test_negative_funding_rate_preserved() {
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("neg_rate.parquet");
-
-        let rates = vec![FundingRate {
-            funding_rate_ts_us: 1672304484000,
-            pair: TradingPair::new("BTC", "USDT"),
-            funding_rate: -0.000375,
-            next_funding_ts_us: 0,
-            exchange: "bybit".to_string(),
-        }];
+        let path = dir.path().join("neg.parquet");
+        let mut rates = make_funding_rates("hyperliquid");
+        rates[0].funding_rate = d("-0.0000125");
 
         write_funding_parquet(&rates, &path).unwrap();
         let loaded = read_funding_parquet(&path).unwrap();
-
-        assert_eq!(loaded.len(), 1);
-        assert!((loaded[0].funding_rate - (-0.000375)).abs() < 1e-8);
+        assert_eq!(loaded[0].funding_rate, d("-0.0000125"));
     }
 
-    // ── Timestamp ordering ───────────────────────────────────────────────
+    #[test]
+    fn legacy_five_column_file_reads_with_defaults() {
+        use arrow::{
+            array::{Float64Array, StringArray, UInt64Array},
+            datatypes::{DataType, Field, Schema},
+            record_batch::RecordBatch,
+        };
+        use parquet::{
+            arrow::ArrowWriter, basic::Compression, file::properties::WriterProperties,
+        };
+        use std::{fs::File, sync::Arc};
+
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("legacy_funding.parquet");
+
+        let schema = Schema::new(vec![
+            Field::new("funding_rate_ts_us", DataType::UInt64, false),
+            Field::new("symbol", DataType::Utf8, false),
+            Field::new("funding_rate", DataType::Float64, false),
+            Field::new("next_funding_ts_us", DataType::UInt64, false),
+            Field::new("exchange", DataType::Utf8, false),
+        ]);
+        let batch = RecordBatch::try_new(
+            Arc::new(schema),
+            vec![
+                Arc::new(UInt64Array::from(vec![1_672_304_484_000_000u64])),
+                Arc::new(StringArray::from(vec!["BTC/USDT"])),
+                Arc::new(Float64Array::from(vec![0.0001])),
+                Arc::new(UInt64Array::from(vec![1_672_308_000_000_000u64])),
+                Arc::new(StringArray::from(vec!["bybit"])),
+            ],
+        )
+        .unwrap();
+        let file = File::create(&path).unwrap();
+        let props = WriterProperties::builder()
+            .set_compression(Compression::SNAPPY)
+            .build();
+        let mut writer = ArrowWriter::try_new(file, batch.schema(), Some(props)).unwrap();
+        writer.write(&batch).unwrap();
+        writer.close().unwrap();
+
+        let loaded = read_funding_parquet(&path).unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].funding_rate, d("0.0001"));
+        assert_eq!(loaded[0].local_funding_ts_us, 0);
+        assert_eq!(loaded[0].recv_seq, 0);
+        assert_eq!(loaded[0].conn_epoch, 0);
+        assert_eq!(loaded[0].premium, None);
+        assert_eq!(loaded[0].interval_hours, 8);
+    }
 
     #[test]
-    fn test_timestamps_preserved_in_order() {
+    fn timestamps_preserved_in_order() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("ts_test.parquet");
 
-        let pair = TradingPair::new("BTC", "USDT");
-        let rates = vec![
-            FundingRate {
-                funding_rate_ts_us: 1000,
-                pair: pair.clone(),
-                funding_rate: 0.0001,
-                next_funding_ts_us: 2000,
+        let rates: Vec<FundingRate> = (1u64..=3)
+            .map(|i| FundingRate {
+                funding_rate_ts_us: i * 1_000_000,
+                local_funding_ts_us: i * 1_000_000 + 7,
+                recv_seq: i,
+                conn_epoch: 1,
+                pair: TradingPair::new("BTC", "USDT"),
+                funding_rate: d("0.0001"),
+                premium: None,
+                interval_hours: 8,
+                next_funding_ts_us: 0,
                 exchange: "bybit".to_string(),
-            },
-            FundingRate {
-                funding_rate_ts_us: 2000,
-                pair: pair.clone(),
-                funding_rate: 0.0002,
-                next_funding_ts_us: 3000,
-                exchange: "bybit".to_string(),
-            },
-            FundingRate {
-                funding_rate_ts_us: 3000,
-                pair: pair.clone(),
-                funding_rate: 0.0003,
-                next_funding_ts_us: 4000,
-                exchange: "bybit".to_string(),
-            },
-        ];
+            })
+            .collect();
 
         write_funding_parquet(&rates, &path).unwrap();
         let loaded = read_funding_parquet(&path).unwrap();
 
         assert_eq!(loaded.len(), 3);
-        assert_eq!(loaded[0].funding_rate_ts_us, 1000);
-        assert_eq!(loaded[1].funding_rate_ts_us, 2000);
-        assert_eq!(loaded[2].funding_rate_ts_us, 3000);
+        for (i, fr) in loaded.iter().enumerate() {
+            let n = i as u64 + 1;
+            assert_eq!(fr.funding_rate_ts_us, n * 1_000_000);
+            assert_eq!(fr.recv_seq, n);
+        }
     }
 
-    // ── Timestamped writer — filename convention ─────────────────────────
-
     #[test]
-    fn test_timestamped_writer_filename_and_mode() {
+    fn timestamped_writer_filename_and_mode() {
         let dir = tempdir().unwrap();
         let rates = make_funding_rates("bybit");
 
-        // Test with "sync" mode
         let path = write_funding_parquet_timestamped(&rates, dir.path(), "sync").unwrap();
         let fname = path.file_name().unwrap().to_str().unwrap();
 
@@ -180,11 +180,9 @@ mod tests {
         );
         assert!(fname.ends_with(".parquet"));
 
-        // Roundtrip
         let loaded = read_funding_parquet(&path).unwrap();
         assert_eq!(loaded.len(), 2);
 
-        // Test with "raw" mode
         let path_raw =
             write_funding_parquet_timestamped(&rates, dir.path(), "raw").unwrap();
         let fname_raw = path_raw.file_name().unwrap().to_str().unwrap();

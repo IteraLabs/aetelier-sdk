@@ -172,6 +172,7 @@ impl EventSynchronizer {
             liquidations: std::mem::take(&mut self.current_liquidations),
             funding_rate: self.current_funding_rates.clone(),
             open_interest: self.current_open_interests.clone(),
+            funding_settlements: Vec::new(),
         };
         self.buffer.push(snap);
         self.total_captured += 1;

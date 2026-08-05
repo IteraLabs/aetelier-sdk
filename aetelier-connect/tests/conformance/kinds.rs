@@ -42,6 +42,9 @@ fn class_of(ev: &DomainEvent) -> Option<Class> {
         // Control signals (connection-gap etc.) are not a documented message
         // class — they never satisfy or violate an expect_classes entry.
         DomainEvent::ConnectionGap { .. } => None,
+        DomainEvent::FundingRate(_) => Some(Class::FundingRate),
+        DomainEvent::OpenInterest(_) => Some(Class::OpenInterest),
+        DomainEvent::FundingSettlement(_) => Some(Class::FundingSettlement),
     }
 }
 
@@ -953,6 +956,7 @@ fn run_fixture_runtime(
             match ev {
                 ReconstructedEvent::Book { .. } => books += 1,
                 ReconstructedEvent::Trade(_) => trades += 1,
+                _ => {}
             }
         }
         let outcome = run

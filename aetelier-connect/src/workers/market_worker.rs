@@ -327,19 +327,22 @@ impl MarketWorker {
                 .get(self.exchange_name.as_str())
                 .copied()
         {
-            // The framework path models only orderbook + trades (`DomainEvent`).
-            // If any derivative datatype is enabled, fall back to the legacy
-            // path so those channels are actually subscribed instead of being
-            // silently filtered out of the FeedSet. Mirrors DataWorker's guard.
+            // Fall back to the legacy path only when an enabled derivative
+            // datatype is outside this adapter's supported set, so those
+            // channels are actually subscribed instead of being silently
+            // filtered out of the FeedSet. Mirrors DataWorker's guard.
+            use aetelier_types::config::markets::market_config::DeclaredDatatype as DD;
+            let supported = adapter.supported_datatypes();
             let dt = self.core.datatypes();
-            if dt.liquidations.enabled
-                || dt.funding_rates.enabled
-                || dt.open_interest.enabled
-            {
+            let unsupported = (dt.liquidations.enabled
+                && !supported.contains(&DD::Liquidations))
+                || (dt.funding_rates.enabled && !supported.contains(&DD::FundingRates))
+                || (dt.open_interest.enabled && !supported.contains(&DD::OpenInterest));
+            if unsupported {
                 tracing::warn!(
                     venue = %self.exchange_name,
-                    "framework_ingest set but liquidations/funding/open_interest are enabled; \
-                     the framework path handles only orderbook + trades, using legacy path"
+                    "framework_ingest set but an enabled derivative datatype is \
+                     outside this adapter's supported set, using legacy path"
                 );
             } else {
                 // A REST-seeded venue needs a seeder. Binance (SeqDelta), KuCoin
@@ -1046,6 +1049,15 @@ impl MarketWorker {
                                     }
                                     sync.on_orderbook(&pair, ts_us, book);
                                 }
+                                ReconstructedEvent::FundingRate(fr) => {
+                                    sync.on_funding(fr);
+                                }
+                                ReconstructedEvent::OpenInterest(oi) => {
+                                    sync.on_open_interest(oi);
+                                }
+                                ReconstructedEvent::FundingSettlement(fs) => {
+                                    sync.on_funding_settlement(fs);
+                                }
                                 ReconstructedEvent::Trade(trade) => {
                                     if trade.source_trade_ts_us > 0 {
                                         let now_us = std::time::SystemTime::now()
@@ -1571,7 +1583,7 @@ fn feed_bybit(
         }
         BybitWssEvent::TickerData(data) => {
             if let Some(ref fr_str) = data.funding_rate
-                && let Ok(fr_val) = fr_str.parse::<f64>()
+                && let Ok(fr_val) = fr_str.parse::<rust_decimal::Decimal>()
             {
                 // next_funding_time is Option<String> (venue ms as string);
                 // convert to the platform microsecond standard. 0 stays 0
@@ -1581,28 +1593,45 @@ fn feed_bybit(
                     .as_deref()
                     .and_then(|s| s.parse::<u64>().ok())
                     .unwrap_or(0);
+                let interval_hours = data
+                    .funding_interval_hour
+                    .as_deref()
+                    .and_then(|s| s.parse::<u32>().ok())
+                    .filter(|h| *h > 0)
+                    .unwrap_or(8);
                 let fr = aetelier_types::funding::FundingRate {
                     funding_rate_ts_us: data.ts.unwrap_or(0) * 1_000,
+                    local_funding_ts_us: 0,
+                    recv_seq: 0,
+                    conn_epoch: 0,
                     pair: pair.clone(),
                     funding_rate: fr_val,
+                    premium: None,
+                    interval_hours,
                     next_funding_ts_us: next_ts_ms * 1_000,
                     exchange: "bybit".to_string(),
                 };
                 sync.on_funding(fr);
             }
             if let Some(ref oi_str) = data.open_interest
-                && let Ok(oi_val) = oi_str.parse::<f64>()
+                && let Ok(oi_val) = oi_str.parse::<rust_decimal::Decimal>()
             {
-                let oi_value: f64 = data
+                let oi_value = data
                     .open_interest_value
                     .as_deref()
-                    .and_then(|s| s.parse::<f64>().ok())
-                    .unwrap_or(0.0);
+                    .and_then(|s| s.parse::<rust_decimal::Decimal>().ok());
                 let oi = aetelier_types::open_interest::OpenInterest {
                     open_interest_ts_us: data.ts.unwrap_or(0) * 1_000,
+                    local_oi_ts_us: 0,
+                    recv_seq: 0,
+                    conn_epoch: 0,
                     pair: pair.clone(),
                     open_interest: oi_val,
                     open_interest_value: oi_value,
+                    mark_px: data
+                        .mark_price
+                        .as_deref()
+                        .and_then(|s| s.parse::<rust_decimal::Decimal>().ok()),
                     exchange: "bybit".to_string(),
                 };
                 sync.on_open_interest(oi);

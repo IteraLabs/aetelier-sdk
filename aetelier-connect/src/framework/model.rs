@@ -20,13 +20,21 @@ pub enum DomainEvent {
     /// An order-book snapshot or incremental delta (pre-reconstruction).
     Book(NormalizedDelta),
     /// A public trade print, with the venue trade-sequence if any.
-    Trade { trade: Trade, sequence: Option<u64> },
+    Trade {
+        trade: Trade,
+        sequence: Option<u64>,
+    },
     /// Connection-level continuity loss: `dropped` messages provably left the
     /// socket undelivered (emitted today only by Coinbase's sequence tracker —
     /// its per-book `Monotonic` predicate cannot see a drop, DAT-OB-INV-10).
     /// Every book fed by this connection is suspect; the runtime gaps them
     /// eagerly and requests a resync.
-    ConnectionGap { dropped: u64 },
+    ConnectionGap {
+        dropped: u64,
+    },
+    FundingRate(aetelier_types::funding::FundingRate),
+    OpenInterest(aetelier_types::open_interest::OpenInterest),
+    FundingSettlement(aetelier_types::funding::FundingSettlement),
 }
 
 impl DomainEvent {
@@ -34,7 +42,7 @@ impl DomainEvent {
     /// time (UTC epoch µs, the platform standard) and the connection
     /// round-trip (µs). Called once per event by the framework driver before
     /// the event leaves the transport layer.
-    pub(crate) fn stamp_local(&mut self, local_us: u64, rtt_us: u64) {
+    pub(crate) fn stamp_local(&mut self, local_us: u64, rtt_us: u64, recv_seq: u64) {
         match self {
             DomainEvent::Book(d) => {
                 d.local_orderbook_ts_us = local_us;
@@ -44,7 +52,19 @@ impl DomainEvent {
                 trade.local_trade_ts_us = local_us;
                 trade.source_trade_rtt_us = rtt_us;
             }
-
+            DomainEvent::FundingRate(fr) => {
+                fr.local_funding_ts_us = local_us;
+                fr.recv_seq = recv_seq;
+            }
+            DomainEvent::OpenInterest(oi) => {
+                oi.local_oi_ts_us = local_us;
+                oi.recv_seq = recv_seq;
+            }
+            DomainEvent::FundingSettlement(fs) => {
+                if fs.local_ts_us == 0 {
+                    fs.local_ts_us = local_us;
+                }
+            }
             DomainEvent::ConnectionGap { .. } => {}
         }
     }
@@ -1423,7 +1443,7 @@ mod tests {
             0,
             false,
         ));
-        book.stamp_local(1_234_567_890, 250);
+        book.stamp_local(1_234_567_890, 250, 1);
         match &book {
             DomainEvent::Book(d) => {
                 assert_eq!(d.local_orderbook_ts_us, 1_234_567_890);
@@ -1442,7 +1462,7 @@ mod tests {
             trade: tr,
             sequence: Some(42),
         };
-        trade.stamp_local(9_876_543_210, 333);
+        trade.stamp_local(9_876_543_210, 333, 2);
         match &trade {
             DomainEvent::Trade { trade, sequence } => {
                 assert_eq!(trade.local_trade_ts_us, 9_876_543_210);

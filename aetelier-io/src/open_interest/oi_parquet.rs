@@ -1,28 +1,18 @@
-//! Parquet I/O for [`OpenInterest`] data.
-
 use aetelier_types::errors::PersistError;
 use aetelier_types::open_interest::OpenInterest;
+#[cfg(feature = "parquet")]
+use aetelier_types::orderbooks::{decimal_to_f64, f64_to_decimal};
+#[cfg(feature = "parquet")]
 use aetelier_types::trading_pair::TradingPair;
 use std::path::Path;
 
-/// Write a batch of [`OpenInterest`] records to a Parquet file with Snappy compression.
-///
-/// # Output Schema
-///
-/// | Column | Arrow Type | Description |
-/// |--------|------------|-------------|
-/// | `ts` | `UInt64` | Observation timestamp (Unix ms) |
-/// | `symbol` | `Utf8` | Trading pair symbol |
-/// | `open_interest` | `Float64` | OI in contract units |
-/// | `open_interest_value` | `Float64` | OI in quote currency |
-/// | `exchange` | `Utf8` | Exchange name |
 #[cfg(feature = "parquet")]
 pub fn write_oi_parquet(
     records: &[OpenInterest],
     path: &Path,
 ) -> Result<(), PersistError> {
     use arrow::{
-        array::{Float64Array, StringArray, UInt64Array},
+        array::{Float64Array, StringArray, UInt32Array, UInt64Array},
         datatypes::{DataType, Field, Schema},
         record_batch::RecordBatch,
     };
@@ -36,23 +26,35 @@ pub fn write_oi_parquet(
     let mut timestamps = Vec::with_capacity(n);
     let mut symbols: Vec<String> = Vec::with_capacity(n);
     let mut oi_values = Vec::with_capacity(n);
-    let mut oi_usd_values = Vec::with_capacity(n);
+    let mut oi_usd_values: Vec<Option<f64>> = Vec::with_capacity(n);
     let mut exchanges: Vec<&str> = Vec::with_capacity(n);
+    let mut local_timestamps = Vec::with_capacity(n);
+    let mut recv_seqs = Vec::with_capacity(n);
+    let mut conn_epochs = Vec::with_capacity(n);
+    let mut mark_pxs: Vec<Option<f64>> = Vec::with_capacity(n);
 
     for oi in records {
         timestamps.push(oi.open_interest_ts_us);
         symbols.push(oi.pair.to_canonical());
-        oi_values.push(oi.open_interest);
-        oi_usd_values.push(oi.open_interest_value);
+        oi_values.push(decimal_to_f64(oi.open_interest));
+        oi_usd_values.push(oi.open_interest_value.map(decimal_to_f64));
         exchanges.push(&oi.exchange);
+        local_timestamps.push(oi.local_oi_ts_us);
+        recv_seqs.push(oi.recv_seq);
+        conn_epochs.push(oi.conn_epoch);
+        mark_pxs.push(oi.mark_px.map(decimal_to_f64));
     }
 
     let schema = Schema::new(vec![
         Field::new("open_interest_ts_us", DataType::UInt64, false),
         Field::new("symbol", DataType::Utf8, false),
         Field::new("open_interest", DataType::Float64, false),
-        Field::new("open_interest_value", DataType::Float64, false),
+        Field::new("open_interest_value", DataType::Float64, true),
         Field::new("exchange", DataType::Utf8, false),
+        Field::new("local_oi_ts_us", DataType::UInt64, false),
+        Field::new("recv_seq", DataType::UInt64, false),
+        Field::new("conn_epoch", DataType::UInt32, false),
+        Field::new("mark_px", DataType::Float64, true),
     ]);
 
     let symbols_refs: Vec<&str> = symbols.iter().map(|s| s.as_str()).collect();
@@ -64,6 +66,10 @@ pub fn write_oi_parquet(
             Arc::new(Float64Array::from(oi_values)),
             Arc::new(Float64Array::from(oi_usd_values)),
             Arc::new(StringArray::from(exchanges)),
+            Arc::new(UInt64Array::from(local_timestamps)),
+            Arc::new(UInt64Array::from(recv_seqs)),
+            Arc::new(UInt32Array::from(conn_epochs)),
+            Arc::new(Float64Array::from(mark_pxs)),
         ],
     )
     .map_err(crate::parquet_err::from_arrow)?;
@@ -92,10 +98,9 @@ pub fn write_oi_parquet(
     ))
 }
 
-/// Read [`OpenInterest`] records from a Parquet file.
 #[cfg(feature = "parquet")]
 pub fn read_oi_parquet(path: &Path) -> Result<Vec<OpenInterest>, PersistError> {
-    use arrow::array::AsArray;
+    use arrow::array::{Array, AsArray};
     use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
     use std::fs::File;
 
@@ -108,6 +113,7 @@ pub fn read_oi_parquet(path: &Path) -> Result<Vec<OpenInterest>, PersistError> {
 
     for batch_result in reader {
         let batch = batch_result.map_err(crate::parquet_err::from_arrow)?;
+        let extended = batch.num_columns() >= 9;
 
         let timestamps = batch
             .column(0)
@@ -122,8 +128,33 @@ pub fn read_oi_parquet(path: &Path) -> Result<Vec<OpenInterest>, PersistError> {
         let exchanges = batch.column(4).as_string::<i32>();
 
         for i in 0..batch.num_rows() {
+            let (local_ts, recv_seq, conn_epoch, mark_px) = if extended {
+                let locals = batch
+                    .column(5)
+                    .as_primitive::<arrow::datatypes::UInt64Type>();
+                let seqs = batch
+                    .column(6)
+                    .as_primitive::<arrow::datatypes::UInt64Type>();
+                let epochs = batch
+                    .column(7)
+                    .as_primitive::<arrow::datatypes::UInt32Type>();
+                let marks = batch
+                    .column(8)
+                    .as_primitive::<arrow::datatypes::Float64Type>();
+                (
+                    locals.value(i),
+                    seqs.value(i),
+                    epochs.value(i),
+                    marks.is_valid(i).then(|| f64_to_decimal(marks.value(i))),
+                )
+            } else {
+                (0, 0, 0, None)
+            };
             records.push(OpenInterest {
                 open_interest_ts_us: timestamps.value(i),
+                local_oi_ts_us: local_ts,
+                recv_seq,
+                conn_epoch,
                 pair: symbols.value(i).parse::<TradingPair>().map_err(|_| {
                     PersistError::Parse(format!(
                         "row {i}: malformed symbol '{}' in {}",
@@ -131,8 +162,11 @@ pub fn read_oi_parquet(path: &Path) -> Result<Vec<OpenInterest>, PersistError> {
                         path.display()
                     ))
                 })?,
-                open_interest: oi_values.value(i),
-                open_interest_value: oi_usd_values.value(i),
+                open_interest: f64_to_decimal(oi_values.value(i)),
+                open_interest_value: oi_usd_values
+                    .is_valid(i)
+                    .then(|| f64_to_decimal(oi_usd_values.value(i))),
+                mark_px,
                 exchange: exchanges.value(i).to_string(),
             });
         }
@@ -148,27 +182,6 @@ pub fn read_oi_parquet(_path: &Path) -> Result<Vec<OpenInterest>, PersistError> 
     ))
 }
 
-/// Write open interest records to a timestamped Parquet file in `output_dir`.
-///
-/// # Filename convention
-///
-/// Output file: `{SYMBOL}_oi_{MODE}_{TIMESTAMP}.parquet`
-///
-/// The symbol is sanitised for filesystem safety (`/` → `-`), so Kraken's
-/// `BTC/USDT` becomes `BTC-USDT` in the filename while the Parquet data
-/// retains the original symbol string.
-///
-/// Examples: `BTCUSDT_oi_sync_20260226_153000.123.parquet`,
-///           `BTC-USDT_oi_sync_20260226_153000.123.parquet`
-///
-/// # Arguments
-///
-/// * `records` — Open interest records to write (must not be empty).
-/// * `output_dir` — Target directory (must exist).
-/// * `mode` — Tag embedded in the filename, typically `"sync"` for
-///   grid-aligned data or `"raw"` for unprocessed captures.
-///
-/// Returns the full path to the written file.
 #[cfg(feature = "parquet")]
 pub fn write_oi_parquet_timestamped(
     records: &[OpenInterest],
@@ -184,7 +197,6 @@ pub fn write_oi_parquet_timestamped(
         .first()
         .map(|r| r.exchange.as_str())
         .unwrap_or("unknown");
-
     let symbol = raw_symbol.replace('/', "-");
     let filename = format!("{}_{}_oi_{}_{}.parquet", exchange, symbol, mode, file_ts);
     let path = output_dir.join(filename);

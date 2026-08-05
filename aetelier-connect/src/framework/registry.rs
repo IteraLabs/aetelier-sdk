@@ -60,6 +60,13 @@ pub trait ExchangeAdapter: Send + Sync + 'static {
     /// venue (a venue may run FullRefresh on one channel and SeqDelta on another).
     fn book_model(&self, channel: &str) -> ReconstructionModel;
 
+    fn supported_datatypes(
+        &self,
+    ) -> &'static [aetelier_types::config::markets::market_config::DeclaredDatatype] {
+        use aetelier_types::config::markets::market_config::DeclaredDatatype as DD;
+        &[DD::Orderbook, DD::Trades]
+    }
+
     /// Spawn one Ingest connection carrying a SET of symbols, pumping
     /// `DomainEvent`s into `tx`.
     ///

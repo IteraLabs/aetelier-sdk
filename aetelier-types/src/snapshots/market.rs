@@ -5,7 +5,7 @@
 //! canonical input to multi-source feature computation.
 
 use crate::{
-    funding::FundingRate,
+    funding::{FundingRate, FundingSettlement},
     liquidations::Liquidation,
     open_interest::OpenInterest,
     orderbooks::{Orderbook, decimal_to_f64},
@@ -38,6 +38,9 @@ pub struct MarketSnapshot {
 
     /// Most recent open interest values (state-based, carried forward).
     pub open_interest: Vec<OpenInterest>,
+
+    #[serde(default)]
+    pub funding_settlements: Vec<FundingSettlement>,
 }
 
 impl MarketSnapshot {
@@ -50,6 +53,7 @@ impl MarketSnapshot {
             liquidations: Vec::new(),
             funding_rate: Vec::new(),
             open_interest: Vec::new(),
+            funding_settlements: Vec::new(),
         }
     }
 
@@ -60,6 +64,7 @@ impl MarketSnapshot {
             || !self.liquidations.is_empty()
             || !self.funding_rate.is_empty()
             || !self.open_interest.is_empty()
+            || !self.funding_settlements.is_empty()
     }
 
     /// Total trade volume (sum of amounts) in this period.

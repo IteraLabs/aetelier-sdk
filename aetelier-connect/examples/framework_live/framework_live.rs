@@ -101,6 +101,9 @@ async fn main() -> anyhow::Result<()> {
 
         while let Some(ev) = recon_rx.recv().await {
             match ev {
+                ReconstructedEvent::FundingRate(_)
+                | ReconstructedEvent::OpenInterest(_)
+                | ReconstructedEvent::FundingSettlement(_) => {}
                 ReconstructedEvent::Book { pair, ts_us, book } => {
                     book_updates += 1;
                     if last_print.elapsed() >= Duration::from_secs(1) {

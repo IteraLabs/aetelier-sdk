@@ -1,28 +1,18 @@
-//! Parquet I/O for [`FundingRate`] data.
-
 use aetelier_types::errors::PersistError;
 use aetelier_types::funding::FundingRate;
+#[cfg(feature = "parquet")]
+use aetelier_types::orderbooks::{decimal_to_f64, f64_to_decimal};
+#[cfg(feature = "parquet")]
 use aetelier_types::trading_pair::TradingPair;
 use std::path::Path;
 
-/// Write a batch of [`FundingRate`] records to a Parquet file with Snappy compression.
-///
-/// # Output Schema
-///
-/// | Column | Arrow Type | Description |
-/// |--------|------------|-------------|
-/// | `ts` | `UInt64` | Observation timestamp (Unix ms) |
-/// | `symbol` | `Utf8` | Trading pair symbol |
-/// | `funding_rate` | `Float64` | Signed funding rate (decimal) |
-/// | `next_funding_ts_us` | `UInt64` | Next settlement timestamp (Unix ms) |
-/// | `exchange` | `Utf8` | Exchange name |
 #[cfg(feature = "parquet")]
 pub fn write_funding_parquet(
     rates: &[FundingRate],
     path: &Path,
 ) -> Result<(), PersistError> {
     use arrow::{
-        array::{Float64Array, StringArray, UInt64Array},
+        array::{Float64Array, StringArray, UInt32Array, UInt64Array},
         datatypes::{DataType, Field, Schema},
         record_batch::RecordBatch,
     };
@@ -38,13 +28,23 @@ pub fn write_funding_parquet(
     let mut funding_rates = Vec::with_capacity(n);
     let mut next_funding_timestamps = Vec::with_capacity(n);
     let mut exchanges: Vec<&str> = Vec::with_capacity(n);
+    let mut local_timestamps = Vec::with_capacity(n);
+    let mut recv_seqs = Vec::with_capacity(n);
+    let mut conn_epochs = Vec::with_capacity(n);
+    let mut premiums: Vec<Option<f64>> = Vec::with_capacity(n);
+    let mut intervals = Vec::with_capacity(n);
 
     for fr in rates {
         timestamps.push(fr.funding_rate_ts_us);
         symbols.push(fr.pair.to_canonical());
-        funding_rates.push(fr.funding_rate);
+        funding_rates.push(decimal_to_f64(fr.funding_rate));
         next_funding_timestamps.push(fr.next_funding_ts_us);
         exchanges.push(&fr.exchange);
+        local_timestamps.push(fr.local_funding_ts_us);
+        recv_seqs.push(fr.recv_seq);
+        conn_epochs.push(fr.conn_epoch);
+        premiums.push(fr.premium.map(decimal_to_f64));
+        intervals.push(fr.interval_hours);
     }
 
     let schema = Schema::new(vec![
@@ -53,6 +53,11 @@ pub fn write_funding_parquet(
         Field::new("funding_rate", DataType::Float64, false),
         Field::new("next_funding_ts_us", DataType::UInt64, false),
         Field::new("exchange", DataType::Utf8, false),
+        Field::new("local_funding_ts_us", DataType::UInt64, false),
+        Field::new("recv_seq", DataType::UInt64, false),
+        Field::new("conn_epoch", DataType::UInt32, false),
+        Field::new("premium", DataType::Float64, true),
+        Field::new("interval_hours", DataType::UInt32, false),
     ]);
 
     let symbols_refs: Vec<&str> = symbols.iter().map(|s| s.as_str()).collect();
@@ -64,6 +69,11 @@ pub fn write_funding_parquet(
             Arc::new(Float64Array::from(funding_rates)),
             Arc::new(UInt64Array::from(next_funding_timestamps)),
             Arc::new(StringArray::from(exchanges)),
+            Arc::new(UInt64Array::from(local_timestamps)),
+            Arc::new(UInt64Array::from(recv_seqs)),
+            Arc::new(UInt32Array::from(conn_epochs)),
+            Arc::new(Float64Array::from(premiums)),
+            Arc::new(UInt32Array::from(intervals)),
         ],
     )
     .map_err(crate::parquet_err::from_arrow)?;
@@ -92,10 +102,9 @@ pub fn write_funding_parquet(
     ))
 }
 
-/// Read [`FundingRate`] records from a Parquet file.
 #[cfg(feature = "parquet")]
 pub fn read_funding_parquet(path: &Path) -> Result<Vec<FundingRate>, PersistError> {
-    use arrow::array::AsArray;
+    use arrow::array::{Array, AsArray};
     use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
     use std::fs::File;
 
@@ -108,6 +117,7 @@ pub fn read_funding_parquet(path: &Path) -> Result<Vec<FundingRate>, PersistErro
 
     for batch_result in reader {
         let batch = batch_result.map_err(crate::parquet_err::from_arrow)?;
+        let extended = batch.num_columns() >= 10;
 
         let timestamps = batch
             .column(0)
@@ -122,8 +132,39 @@ pub fn read_funding_parquet(path: &Path) -> Result<Vec<FundingRate>, PersistErro
         let exchanges = batch.column(4).as_string::<i32>();
 
         for i in 0..batch.num_rows() {
+            let (local_ts, recv_seq, conn_epoch, premium, interval_hours) = if extended {
+                let locals = batch
+                    .column(5)
+                    .as_primitive::<arrow::datatypes::UInt64Type>();
+                let seqs = batch
+                    .column(6)
+                    .as_primitive::<arrow::datatypes::UInt64Type>();
+                let epochs = batch
+                    .column(7)
+                    .as_primitive::<arrow::datatypes::UInt32Type>();
+                let premiums = batch
+                    .column(8)
+                    .as_primitive::<arrow::datatypes::Float64Type>();
+                let intervals = batch
+                    .column(9)
+                    .as_primitive::<arrow::datatypes::UInt32Type>();
+                (
+                    locals.value(i),
+                    seqs.value(i),
+                    epochs.value(i),
+                    premiums
+                        .is_valid(i)
+                        .then(|| f64_to_decimal(premiums.value(i))),
+                    intervals.value(i),
+                )
+            } else {
+                (0, 0, 0, None, 8)
+            };
             rates.push(FundingRate {
                 funding_rate_ts_us: timestamps.value(i),
+                local_funding_ts_us: local_ts,
+                recv_seq,
+                conn_epoch,
                 pair: symbols.value(i).parse::<TradingPair>().map_err(|_| {
                     PersistError::Parse(format!(
                         "row {i}: malformed symbol '{}' in {}",
@@ -131,7 +172,9 @@ pub fn read_funding_parquet(path: &Path) -> Result<Vec<FundingRate>, PersistErro
                         path.display()
                     ))
                 })?,
-                funding_rate: funding_rates.value(i),
+                funding_rate: f64_to_decimal(funding_rates.value(i)),
+                premium,
+                interval_hours,
                 next_funding_ts_us: next_funding_timestamps.value(i),
                 exchange: exchanges.value(i).to_string(),
             });
@@ -148,27 +191,6 @@ pub fn read_funding_parquet(_path: &Path) -> Result<Vec<FundingRate>, PersistErr
     ))
 }
 
-/// Write funding rates to a timestamped Parquet file in `output_dir`.
-///
-/// # Filename convention
-///
-/// Output file: `{SYMBOL}_funding_{MODE}_{TIMESTAMP}.parquet`
-///
-/// The symbol is sanitised for filesystem safety (`/` → `-`), so Kraken's
-/// `BTC/USDT` becomes `BTC-USDT` in the filename while the Parquet data
-/// retains the original symbol string.
-///
-/// Examples: `BTCUSDT_funding_sync_20260226_153000.123.parquet`,
-///           `BTC-USDT_funding_sync_20260226_153000.123.parquet`
-///
-/// # Arguments
-///
-/// * `rates` — Funding rate records to write (must not be empty).
-/// * `output_dir` — Target directory (must exist).
-/// * `mode` — Tag embedded in the filename, typically `"sync"` for
-///   grid-aligned data or `"raw"` for unprocessed captures.
-///
-/// Returns the full path to the written file.
 #[cfg(feature = "parquet")]
 pub fn write_funding_parquet_timestamped(
     rates: &[FundingRate],

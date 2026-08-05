@@ -42,6 +42,9 @@ pub enum ReconstructedEvent {
     },
     /// A public trade print.
     Trade(Trade),
+    FundingRate(aetelier_types::funding::FundingRate),
+    OpenInterest(aetelier_types::open_interest::OpenInterest),
+    FundingSettlement(aetelier_types::funding::FundingSettlement),
 }
 
 /// Why the runtime loop ended.
@@ -125,6 +128,8 @@ pub struct SourceRuntime {
     /// feeds lock only on an actual transition.
     live_orders: HashSet<TradingPair>,
     live_trades: HashSet<TradingPair>,
+    live_funding: HashSet<TradingPair>,
+    live_oi: HashSet<TradingPair>,
     /// Worker-owned cross-reconnect trade-sequence carry (see
     /// [`Self::with_trade_seq_carry`]).
     trade_seq_carry: Option<Arc<std::sync::Mutex<HashMap<TradingPair, u64>>>>,
@@ -190,6 +195,8 @@ impl SourceRuntime {
             feeds: None,
             live_orders: HashSet::new(),
             live_trades: HashSet::new(),
+            live_funding: HashSet::new(),
+            live_oi: HashSet::new(),
             trade_seq_carry: None,
         }
     }
@@ -627,6 +634,60 @@ impl SourceRuntime {
                 self.note_live(&pair, FeedDatatype::Trades);
                 Ok(false)
             }
+            DomainEvent::FundingRate(fr) => {
+                if !self.declared.contains(DeclaredDatatype::FundingRates) {
+                    self.metrics.bump_undeclared_dropped();
+                    if self
+                        .undeclared_warned
+                        .insert(DeclaredDatatype::FundingRates)
+                    {
+                        tracing::warn!(
+                            exchange = %self.exchange,
+                            datatype = "funding_rates",
+                            "runtime.undeclared_event_dropped"
+                        );
+                    }
+                    return Ok(false);
+                }
+                let pair = fr.pair.clone();
+                out.send(ReconstructedEvent::FundingRate(fr))
+                    .await
+                    .map_err(|_| ())?;
+                self.note_live(&pair, FeedDatatype::FundingRates);
+                Ok(false)
+            }
+            DomainEvent::OpenInterest(oi) => {
+                if !self.declared.contains(DeclaredDatatype::OpenInterest) {
+                    self.metrics.bump_undeclared_dropped();
+                    if self
+                        .undeclared_warned
+                        .insert(DeclaredDatatype::OpenInterest)
+                    {
+                        tracing::warn!(
+                            exchange = %self.exchange,
+                            datatype = "open_interest",
+                            "runtime.undeclared_event_dropped"
+                        );
+                    }
+                    return Ok(false);
+                }
+                let pair = oi.pair.clone();
+                out.send(ReconstructedEvent::OpenInterest(oi))
+                    .await
+                    .map_err(|_| ())?;
+                self.note_live(&pair, FeedDatatype::OpenInterest);
+                Ok(false)
+            }
+            DomainEvent::FundingSettlement(fs) => {
+                if !self.declared.contains(DeclaredDatatype::FundingRates) {
+                    self.metrics.bump_undeclared_dropped();
+                    return Ok(false);
+                }
+                out.send(ReconstructedEvent::FundingSettlement(fs))
+                    .await
+                    .map_err(|_| ())?;
+                Ok(false)
+            }
         }
     }
 
@@ -774,6 +835,8 @@ impl SourceRuntime {
         let set = match datatype {
             FeedDatatype::Orders => &mut self.live_orders,
             FeedDatatype::Trades => &mut self.live_trades,
+            FeedDatatype::FundingRates => &mut self.live_funding,
+            FeedDatatype::OpenInterest => &mut self.live_oi,
         };
         if set.contains(pair) {
             return;
@@ -1102,6 +1165,7 @@ mod tests {
                     emitted_books += 1;
                 }
                 ReconstructedEvent::Trade(_) => emitted_trades += 1,
+                _ => {}
             }
         }
 
@@ -1233,6 +1297,7 @@ mod tests {
                     latest.insert(pair.to_canonical(), book);
                 }
                 ReconstructedEvent::Trade(_) => trades += 1,
+                _ => {}
             }
         }
 
@@ -1313,7 +1378,7 @@ mod tests {
                     Some(("101".parse().unwrap(), "2".parse().unwrap()))
                 );
             }
-            ReconstructedEvent::Trade(_) => panic!("expected a Book, got a Trade"),
+            other => panic!("expected a Book, got {}", reconstructed_kind(&other)),
         }
     }
 
@@ -1323,6 +1388,16 @@ mod tests {
     /// source ts is *preserved* (exchange event time), the local ts is the
     /// receipt instant, and the rtt is the connection round-trip — all carried
     /// straight through reconstruction rather than re-stamped.
+    fn reconstructed_kind(ev: &ReconstructedEvent) -> &'static str {
+        match ev {
+            ReconstructedEvent::Book { .. } => "Book",
+            ReconstructedEvent::Trade(_) => "Trade",
+            ReconstructedEvent::FundingRate(_) => "FundingRate",
+            ReconstructedEvent::OpenInterest(_) => "OpenInterest",
+            ReconstructedEvent::FundingSettlement(_) => "FundingSettlement",
+        }
+    }
+
     #[tokio::test]
     async fn book_timestamps_thread_through_reconstruction() {
         let (ev_tx, ev_rx) = mpsc::channel(8);
@@ -1374,7 +1449,7 @@ mod tests {
                     "round-trip must thread through reconstruction"
                 );
             }
-            ReconstructedEvent::Trade(_) => panic!("expected a Book, got a Trade"),
+            other => panic!("expected a Book, got {}", reconstructed_kind(&other)),
         }
     }
 
@@ -2106,6 +2181,7 @@ mod tests {
             match ev {
                 ReconstructedEvent::Book { .. } => books += 1,
                 ReconstructedEvent::Trade(_) => trades += 1,
+                _ => {}
             }
         }
         assert!(
@@ -2184,6 +2260,7 @@ mod tests {
             match ev {
                 ReconstructedEvent::Book { .. } => books += 1,
                 ReconstructedEvent::Trade(_) => trades += 1,
+                _ => {}
             }
         }
         assert!(matches!(outcome, RuntimeOutcome::Finished));

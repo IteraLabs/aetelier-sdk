@@ -57,6 +57,7 @@ where
     let rtt_us = Arc::new(AtomicU64::new(0));
     let transport = WssTransport::<H, D>::new(hooks, symbols, declared);
     let transport_task = tokio::spawn(transport.run(raw_tx, rtt_us.clone(), metrics));
+    let mut recv_seq: u64 = 0;
 
     loop {
         tokio::select! {
@@ -67,7 +68,8 @@ where
             changed = shutdown.changed() => {
                 if changed.is_err() || *shutdown.borrow() {
                     transport_task.abort();
-                    let flush = drain_buffered(&mut raw_rx, &normalizer, &tx, &rtt_us);
+                    let flush =
+                        drain_buffered(&mut raw_rx, &normalizer, &tx, &rtt_us, recv_seq);
                     return match tokio::time::timeout(STOP_DRAIN_TIMEOUT, flush).await {
                         Ok(()) => TaskExit::Completed,
                         Err(_) => TaskExit::DrainTimedOut,
@@ -78,7 +80,8 @@ where
                 Some((ev, receipt_us)) => {
                     let rtt = rtt_us.load(Ordering::Relaxed);
                     for mut de in normalizer.normalize(ev) {
-                        de.stamp_local(receipt_us, rtt);
+                        recv_seq += 1;
+                        de.stamp_local(receipt_us, rtt, recv_seq);
                         if tx.send(de).await.is_err() {
                             // Sync end dropped — intentional shutdown.
                             transport_task.abort();
@@ -103,6 +106,7 @@ async fn drain_buffered<E, N>(
     normalizer: &N,
     tx: &mpsc::Sender<DomainEvent>,
     rtt_us: &AtomicU64,
+    mut recv_seq: u64,
 ) where
     E: Send + 'static,
     N: Normalizer<Event = E>,
@@ -110,7 +114,8 @@ async fn drain_buffered<E, N>(
     while let Ok((ev, receipt_us)) = raw_rx.try_recv() {
         let rtt = rtt_us.load(Ordering::Relaxed);
         for mut de in normalizer.normalize(ev) {
-            de.stamp_local(receipt_us, rtt);
+            recv_seq += 1;
+            de.stamp_local(receipt_us, rtt, recv_seq);
             if tx.send(de).await.is_err() {
                 return;
             }
@@ -176,7 +181,7 @@ mod tests {
             raw_tx.try_send((i, i)).unwrap();
         }
 
-        let flush = drain_buffered(&mut raw_rx, &StubNormalizer, &tx, &rtt);
+        let flush = drain_buffered(&mut raw_rx, &StubNormalizer, &tx, &rtt, 0);
         tokio::time::timeout(STOP_DRAIN_TIMEOUT, flush)
             .await
             .expect("drain of a small buffer finishes well inside the bound");
@@ -199,7 +204,7 @@ mod tests {
             .unwrap();
         raw_tx.try_send((1, 1)).unwrap();
 
-        let flush = drain_buffered(&mut raw_rx, &StubNormalizer, &tx, &rtt);
+        let flush = drain_buffered(&mut raw_rx, &StubNormalizer, &tx, &rtt, 0);
         let out = tokio::time::timeout(STOP_DRAIN_TIMEOUT, flush).await;
         assert!(out.is_err(), "stuck consumer must trip the drain bound");
     }

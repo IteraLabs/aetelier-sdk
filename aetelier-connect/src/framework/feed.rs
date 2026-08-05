@@ -41,6 +41,8 @@ impl std::fmt::Display for FeedId {
 pub enum FeedDatatype {
     Orders,
     Trades,
+    FundingRates,
+    OpenInterest,
 }
 
 /// `Feed` lifecycle state. `Closed`/`Rejected`/`Failed` are terminal.

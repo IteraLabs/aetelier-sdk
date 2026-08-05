@@ -77,8 +77,13 @@ mod tests {
     fn make_fr(ts_us: u64, rate: f64) -> FundingRate {
         FundingRate {
             funding_rate_ts_us: ts_us,
+            local_funding_ts_us: 0,
+            recv_seq: 0,
+            conn_epoch: 0,
             pair: TradingPair::new("BTC", "USDT"),
-            funding_rate: rate,
+            funding_rate: f64_to_decimal(rate),
+            premium: None,
+            interval_hours: 8,
             // 8 hours in microseconds.
             next_funding_ts_us: ts_us + 28_800_000_000,
             exchange: "test".to_string(),
@@ -88,9 +93,13 @@ mod tests {
     fn make_oi(ts_us: u64, oi: f64, oi_value: f64) -> OpenInterest {
         OpenInterest {
             open_interest_ts_us: ts_us,
+            local_oi_ts_us: 0,
+            recv_seq: 0,
+            conn_epoch: 0,
             pair: TradingPair::new("BTC", "USDT"),
-            open_interest: oi,
-            open_interest_value: oi_value,
+            open_interest: f64_to_decimal(oi),
+            open_interest_value: Some(f64_to_decimal(oi_value)),
+            mark_px: None,
             exchange: "test".to_string(),
         }
     }
@@ -119,6 +128,7 @@ mod tests {
             liquidations: Vec::new(),
             funding_rate: Vec::new(),
             open_interest: Vec::new(),
+            funding_settlements: vec![],
         };
         assert!(snap.has_data());
     }
@@ -132,6 +142,7 @@ mod tests {
             liquidations: Vec::new(),
             funding_rate: Vec::new(),
             open_interest: Vec::new(),
+            funding_settlements: vec![],
         };
         assert!(snap.has_data());
     }
@@ -145,6 +156,7 @@ mod tests {
             liquidations: vec![make_liq(1, 10.0, 50_000.0)],
             funding_rate: Vec::new(),
             open_interest: Vec::new(),
+            funding_settlements: vec![],
         };
         assert!(snap.has_data());
     }
@@ -158,6 +170,7 @@ mod tests {
             liquidations: Vec::new(),
             funding_rate: vec![make_fr(1, 0.0001)],
             open_interest: Vec::new(),
+            funding_settlements: vec![],
         };
         assert!(snap.has_data());
     }
@@ -171,6 +184,7 @@ mod tests {
             liquidations: Vec::new(),
             funding_rate: Vec::new(),
             open_interest: vec![make_oi(1, 1000.0, 50_000_000.0)],
+            funding_settlements: vec![],
         };
         assert!(snap.has_data());
     }
@@ -192,6 +206,7 @@ mod tests {
             liquidations: Vec::new(),
             funding_rate: Vec::new(),
             open_interest: Vec::new(),
+            funding_settlements: vec![],
         };
         let vol = snap.trade_volume();
         assert!((vol - 2.25).abs() < f64::EPSILON);
@@ -206,6 +221,7 @@ mod tests {
             liquidations: Vec::new(),
             funding_rate: Vec::new(),
             open_interest: Vec::new(),
+            funding_settlements: vec![],
         };
         assert_eq!(snap.trade_count(), 2);
     }
@@ -222,6 +238,7 @@ mod tests {
             ],
             funding_rate: Vec::new(),
             open_interest: Vec::new(),
+            funding_settlements: vec![],
         };
         let notional = snap.liquidation_notional();
         assert!((notional - 130_000.0).abs() < f64::EPSILON);
@@ -254,6 +271,7 @@ mod tests {
             liquidations: Vec::new(),
             funding_rate: Vec::new(),
             open_interest: Vec::new(),
+            funding_settlements: vec![],
         };
         let agg = MarketAggregate::from_snapshot(&snap, 0.0);
 

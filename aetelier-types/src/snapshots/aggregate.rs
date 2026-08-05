@@ -209,10 +209,11 @@ impl MarketAggregate {
         let (fr_rate, fr_annualized, fr_next_settlement_delta) =
             match snap.funding_rate.last() {
                 Some(fr) => {
-                    let rate = fr.funding_rate;
-                    let annualized = rate * 3.0 * 365.0;
+                    let rate = decimal_to_f64(fr.funding_rate);
+                    let settlements_per_year = 8760.0 / fr.interval_hours as f64;
+                    let annualized = rate * settlements_per_year;
                     let delta = if fr.next_funding_ts_us > 0 {
-                        fr.next_funding_ts_us as i64 - fr.funding_rate_ts_us as i64
+                        fr.next_funding_ts_us as i64 - fr.effective_ts_us() as i64
                     } else {
                         0
                     };
@@ -223,7 +224,14 @@ impl MarketAggregate {
 
         // -- Open Interest ---------------------------------------------------
         let (oi_contracts, oi_value) = match snap.open_interest.last() {
-            Some(oi) => (oi.open_interest, oi.open_interest_value),
+            Some(oi) => {
+                let value = oi
+                    .open_interest_value
+                    .or_else(|| oi.mark_px.map(|px| oi.open_interest * px))
+                    .map(decimal_to_f64)
+                    .unwrap_or(0.0);
+                (decimal_to_f64(oi.open_interest), value)
+            }
             None => (0.0, 0.0),
         };
         let oi_change = oi_contracts - prev_oi;

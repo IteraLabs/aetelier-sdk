@@ -91,8 +91,13 @@ mod tests {
     fn make_fr(ts_ms: u64, pair: TradingPair, rate: f64) -> FundingRate {
         FundingRate {
             funding_rate_ts_us: ts_ms,
+            local_funding_ts_us: 0,
+            recv_seq: 0,
+            conn_epoch: 0,
             pair,
-            funding_rate: rate,
+            funding_rate: f64_to_decimal(rate),
+            premium: None,
+            interval_hours: 8,
             next_funding_ts_us: ts_ms + 28_800_000,
             exchange: "test".to_string(),
         }
@@ -101,9 +106,13 @@ mod tests {
     fn make_oi(ts_ms: u64, pair: TradingPair, oi: f64, oi_value: f64) -> OpenInterest {
         OpenInterest {
             open_interest_ts_us: ts_ms,
+            local_oi_ts_us: 0,
+            recv_seq: 0,
+            conn_epoch: 0,
             pair,
-            open_interest: oi,
-            open_interest_value: oi_value,
+            open_interest: f64_to_decimal(oi),
+            open_interest_value: Some(f64_to_decimal(oi_value)),
+            mark_px: None,
             exchange: "test".to_string(),
         }
     }
@@ -254,9 +263,7 @@ mod tests {
         sync.on_orderbook(&btcusdt(), 2_000_000_000, ob2);
 
         assert_eq!(sync.buffer[1].funding_rate.len(), 1);
-        assert!(
-            (sync.buffer[1].funding_rate[0].funding_rate - 0.0001).abs() < f64::EPSILON
-        );
+        assert!(sync.buffer[1].funding_rate[0].funding_rate == f64_to_decimal(0.0001));
     }
 
     #[test]
@@ -274,9 +281,7 @@ mod tests {
         sync.on_orderbook(&btcusdt(), 2_000_000_000, ob2);
 
         assert_eq!(sync.buffer[1].open_interest.len(), 1);
-        assert!(
-            (sync.buffer[1].open_interest[0].open_interest - 1000.0).abs() < f64::EPSILON
-        );
+        assert!(sync.buffer[1].open_interest[0].open_interest == f64_to_decimal(1000.0));
     }
 
     #[test]
@@ -293,9 +298,7 @@ mod tests {
         sync.on_orderbook(&btcusdt(), 2_000_000_000, ob2);
 
         assert_eq!(sync.buffer[1].funding_rate.len(), 1);
-        assert!(
-            (sync.buffer[1].funding_rate[0].funding_rate - 0.0002).abs() < f64::EPSILON
-        );
+        assert!(sync.buffer[1].funding_rate[0].funding_rate == f64_to_decimal(0.0002));
     }
 
     // ------------------------------------------------------------------ //

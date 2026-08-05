@@ -1,51 +1,73 @@
-//! Unit tests for `OpenInterestBuilder` validation and defaults.
-
 #[cfg(test)]
 mod tests {
     use aetelier_types::TradingPair;
     use aetelier_types::errors::BuildError;
     use aetelier_types::open_interest::OpenInterest;
+    use rust_decimal::Decimal;
 
-    // ── Happy path ──────────────────────────────────────────────────────
+    fn d(s: &str) -> Decimal {
+        s.parse().unwrap()
+    }
 
     #[test]
     fn build_happy_path() {
         let oi = OpenInterest::builder()
-            .open_interest_ts_us(1_700_000_000_000)
+            .open_interest_ts_us(1_700_000_000_000_000)
             .pair(TradingPair::new("BTC", "USDT"))
-            .open_interest(50_000.0)
-            .open_interest_value(2_100_000_000.0)
+            .open_interest(d("50000"))
+            .open_interest_value(d("2100000000"))
             .exchange("bybit".into())
             .build()
             .expect("all fields set");
 
-        assert_eq!(oi.open_interest_ts_us, 1_700_000_000_000);
+        assert_eq!(oi.open_interest_ts_us, 1_700_000_000_000_000);
         assert_eq!(oi.pair, TradingPair::new("BTC", "USDT"));
-        assert!((oi.open_interest - 50_000.0).abs() < f64::EPSILON);
-        assert!((oi.open_interest_value - 2_100_000_000.0).abs() < f64::EPSILON);
+        assert_eq!(oi.open_interest, d("50000"));
+        assert_eq!(oi.open_interest_value, Some(d("2100000000")));
         assert_eq!(oi.exchange, "bybit");
+        assert_eq!(oi.effective_ts_us(), 1_700_000_000_000_000);
     }
 
     #[test]
-    fn open_interest_value_defaults_to_zero() {
+    fn open_interest_value_defaults_to_absent_not_zero() {
         let oi = OpenInterest::builder()
             .open_interest_ts_us(1)
             .pair(TradingPair::new("X", "USDT"))
-            .open_interest(100.0)
+            .open_interest(d("100"))
             .exchange("e".into())
             .build()
             .unwrap();
 
-        assert!((oi.open_interest_value - 0.0).abs() < f64::EPSILON);
+        assert_eq!(oi.open_interest_value, None);
+        assert_eq!(oi.mark_px, None);
     }
 
-    // ── Missing-field errors ────────────────────────────────────────────
+    #[test]
+    fn local_ts_alone_is_sufficient_and_effective() {
+        let oi = OpenInterest::builder()
+            .local_oi_ts_us(1_700_000_000_000_000)
+            .recv_seq(7)
+            .conn_epoch(1)
+            .pair(TradingPair::new("BTC", "USDC"))
+            .open_interest(d("12345.678"))
+            .mark_px(d("50000.5"))
+            .exchange("hyperliquid".into())
+            .build()
+            .unwrap();
+
+        assert_eq!(oi.open_interest_ts_us, 0);
+        assert_eq!(oi.effective_ts_us(), 1_700_000_000_000_000);
+        assert_eq!(oi.recv_seq, 7);
+        assert_eq!(oi.conn_epoch, 1);
+        assert_eq!(oi.mark_px, Some(d("50000.5")));
+        assert_eq!(oi.open_interest_value, None);
+    }
 
     #[test]
-    fn missing_ts() {
+    fn missing_both_timestamps() {
         let err = OpenInterest::builder()
             .pair(TradingPair::new("X", "USDT"))
-            .open_interest(1.0)
+            .open_interest(d("1"))
             .exchange("e".into())
             .build()
             .unwrap_err();
@@ -56,7 +78,7 @@ mod tests {
     fn missing_symbol() {
         let err = OpenInterest::builder()
             .open_interest_ts_us(1)
-            .open_interest(1.0)
+            .open_interest(d("1"))
             .exchange("e".into())
             .build()
             .unwrap_err();
@@ -79,7 +101,7 @@ mod tests {
         let err = OpenInterest::builder()
             .open_interest_ts_us(1)
             .pair(TradingPair::new("X", "USDT"))
-            .open_interest(1.0)
+            .open_interest(d("1"))
             .build()
             .unwrap_err();
         assert_eq!(err, BuildError::MissingField("exchange"));

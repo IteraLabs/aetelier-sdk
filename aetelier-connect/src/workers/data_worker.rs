@@ -282,9 +282,17 @@ impl DataWorker {
             );
             return false;
         }
+        let adapter = *crate::framework::registry::registry()
+            .get(exchange)
+            .unwrap();
+        let supported = adapter.supported_datatypes();
+        use aetelier_types::config::markets::market_config::DeclaredDatatype as DD;
         let dt = self.core.datatypes();
-        if dt.liquidations.enabled || dt.funding_rates.enabled || dt.open_interest.enabled
-        {
+        let unsupported = (dt.liquidations.enabled
+            && !supported.contains(&DD::Liquidations))
+            || (dt.funding_rates.enabled && !supported.contains(&DD::FundingRates))
+            || (dt.open_interest.enabled && !supported.contains(&DD::OpenInterest));
+        if unsupported {
             tracing::warn!(
                 exchange = exchange,
                 "data_worker.framework_ingest.unsupported_datatypes_fallback_legacy"
@@ -624,6 +632,15 @@ impl DataWorker {
                                 crate::framework::model::DomainEvent::Trade { trade, .. } => {
                                     trade.source_trade_ts_us
                                 }
+                                crate::framework::model::DomainEvent::FundingRate(fr) => {
+                                    fr.effective_ts_us()
+                                }
+                                crate::framework::model::DomainEvent::OpenInterest(oi) => {
+                                    oi.effective_ts_us()
+                                }
+                                crate::framework::model::DomainEvent::FundingSettlement(fs) => {
+                                    fs.funding_time_us
+                                }
                                 // Handled above; unreachable here.
                                 crate::framework::model::DomainEvent::ConnectionGap { .. } => 0,
                             };
@@ -643,6 +660,11 @@ impl DataWorker {
                                 crate::framework::model::DomainEvent::Book(_) => ob_topic.as_deref(),
                                 crate::framework::model::DomainEvent::Trade { .. } => {
                                     trade_topic.as_deref()
+                                }
+                                crate::framework::model::DomainEvent::FundingRate(_)
+                                | crate::framework::model::DomainEvent::OpenInterest(_)
+                                | crate::framework::model::DomainEvent::FundingSettlement(_) => {
+                                    None
                                 }
                                 crate::framework::model::DomainEvent::ConnectionGap { .. } => None,
                             };

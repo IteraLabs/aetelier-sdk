@@ -1,12 +1,3 @@
-//! Parquet round-trip tests for open interest data.
-//!
-//! Each test constructs `OpenInterest` structs with known fields, writes them
-//! to Parquet via `write_oi_parquet`, reads back via `read_oi_parquet`,
-//! and asserts field equality.
-//!
-//! These tests require the `parquet` feature:
-//!   cargo test --features parquet -p aetelier_types test_oi_parquet_roundtrip
-
 #[cfg(test)]
 #[cfg(feature = "parquet")]
 mod tests {
@@ -15,60 +6,43 @@ mod tests {
     };
     use aetelier_types::open_interest::OpenInterest;
     use aetelier_types::trading_pair::TradingPair;
+    use rust_decimal::Decimal;
     use tempfile::tempdir;
 
-    // ── Helpers ──────────────────────────────────────────────────────────
+    fn d(s: &str) -> Decimal {
+        s.parse().unwrap()
+    }
 
-    /// Build a pair of open interest records for a given exchange/symbol.
     fn make_oi_records(exchange: &str) -> Vec<OpenInterest> {
         let pair = TradingPair::new("BTC", "USDT");
         vec![
             OpenInterest {
-                open_interest_ts_us: 1672304484000,
+                open_interest_ts_us: 1_672_304_484_000_000,
+                local_oi_ts_us: 1_672_304_484_010_000,
+                recv_seq: 1,
+                conn_epoch: 1,
                 pair: pair.clone(),
-                open_interest: 32000.5,
-                open_interest_value: 752_000_000.0,
+                open_interest: d("32000.5"),
+                open_interest_value: Some(d("752000000")),
+                mark_px: Some(d("23500.25")),
                 exchange: exchange.to_string(),
             },
             OpenInterest {
-                open_interest_ts_us: 1672304784000,
+                open_interest_ts_us: 0,
+                local_oi_ts_us: 1_672_304_784_020_000,
+                recv_seq: 2,
+                conn_epoch: 1,
                 pair: pair.clone(),
-                open_interest: 32100.0,
-                open_interest_value: 754_350_000.0,
+                open_interest: d("32100"),
+                open_interest_value: None,
+                mark_px: None,
                 exchange: exchange.to_string(),
             },
         ]
     }
 
-    /// Assert a loaded OI record matches expected values.
-    fn assert_oi(
-        oi: &OpenInterest,
-        _symbol: &str,
-        exchange: &str,
-        interest: f64,
-        value: f64,
-    ) {
-        assert_eq!(oi.pair, TradingPair::new("BTC", "USDT"));
-        assert_eq!(oi.exchange, exchange);
-        assert!(
-            (oi.open_interest - interest).abs() < 1.0,
-            "expected OI ~{}, got {}",
-            interest,
-            oi.open_interest,
-        );
-        assert!(
-            (oi.open_interest_value - value).abs() < 100.0,
-            "expected OI value ~{}, got {}",
-            value,
-            oi.open_interest_value,
-        );
-        assert!(oi.open_interest_ts_us > 0);
-    }
-
-    // ── Per-exchange round-trip tests ────────────────────────────────────
-
     #[test]
-    fn test_bybit_oi_parquet_roundtrip() {
+    fn roundtrip_preserves_every_field_exactly() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("bybit_oi.parquet");
         let records = make_oi_records("bybit");
@@ -77,21 +51,26 @@ mod tests {
         let loaded = read_oi_parquet(&path).unwrap();
 
         assert_eq!(loaded.len(), 2);
-        assert_oi(&loaded[0], "btcusdt", "bybit", 32000.5, 752_000_000.0);
-        assert_oi(&loaded[1], "btcusdt", "bybit", 32100.0, 754_350_000.0);
+        assert_eq!(loaded[0].open_interest_ts_us, 1_672_304_484_000_000);
+        assert_eq!(loaded[0].local_oi_ts_us, 1_672_304_484_010_000);
+        assert_eq!(loaded[0].recv_seq, 1);
+        assert_eq!(loaded[0].conn_epoch, 1);
+        assert_eq!(loaded[0].open_interest, d("32000.5"));
+        assert_eq!(loaded[0].open_interest_value, Some(d("752000000")));
+        assert_eq!(loaded[0].mark_px, Some(d("23500.25")));
+        assert_eq!(loaded[0].pair, TradingPair::new("BTC", "USDT"));
+        assert_eq!(loaded[0].exchange, "bybit");
+
+        assert_eq!(loaded[1].open_interest_ts_us, 0);
+        assert_eq!(loaded[1].effective_ts_us(), 1_672_304_784_020_000);
+        assert_eq!(loaded[1].open_interest_value, None);
+        assert_eq!(loaded[1].mark_px, None);
     }
 
     #[test]
-    fn test_multi_exchange_oi_parquet_roundtrip() {
+    fn multi_exchange_roundtrip() {
         let dir = tempdir().unwrap();
-
-        let exchanges = [
-            ("btcusdt", "bybit"),
-            ("btcusd", "coinbase"),
-            ("btcusd", "kraken"),
-        ];
-
-        for (symbol, exchange) in &exchanges {
+        for exchange in ["bybit", "coinbase", "hyperliquid"] {
             let path = dir.path().join(format!("{}_oi.parquet", exchange));
             let records = make_oi_records(exchange);
 
@@ -99,60 +78,97 @@ mod tests {
             let loaded = read_oi_parquet(&path).unwrap();
 
             assert_eq!(loaded.len(), 2);
-            assert_oi(&loaded[0], symbol, exchange, 32000.5, 752_000_000.0);
-            assert_oi(&loaded[1], symbol, exchange, 32100.0, 754_350_000.0);
+            assert_eq!(loaded[0].exchange, exchange);
+            assert_eq!(loaded[0].open_interest, d("32000.5"));
         }
     }
 
-    // ── Timestamp ordering ───────────────────────────────────────────────
-
     #[test]
-    fn test_timestamps_preserved_in_order() {
+    fn timestamps_preserved_in_order() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("ts_test.parquet");
 
-        let pair = TradingPair::new("BTC", "USDT");
-        let records = vec![
-            OpenInterest {
-                open_interest_ts_us: 1000,
-                pair: pair.clone(),
-                open_interest: 100.0,
-                open_interest_value: 1_000_000.0,
+        let records: Vec<OpenInterest> = (1u64..=3)
+            .map(|i| OpenInterest {
+                open_interest_ts_us: i * 1_000_000,
+                local_oi_ts_us: i * 1_000_000 + 5,
+                recv_seq: i,
+                conn_epoch: 1,
+                pair: TradingPair::new("BTC", "USDT"),
+                open_interest: d("100") * Decimal::from(i),
+                open_interest_value: None,
+                mark_px: None,
                 exchange: "bybit".to_string(),
-            },
-            OpenInterest {
-                open_interest_ts_us: 2000,
-                pair: pair.clone(),
-                open_interest: 200.0,
-                open_interest_value: 2_000_000.0,
-                exchange: "bybit".to_string(),
-            },
-            OpenInterest {
-                open_interest_ts_us: 3000,
-                pair: pair.clone(),
-                open_interest: 300.0,
-                open_interest_value: 3_000_000.0,
-                exchange: "bybit".to_string(),
-            },
-        ];
+            })
+            .collect();
 
         write_oi_parquet(&records, &path).unwrap();
         let loaded = read_oi_parquet(&path).unwrap();
 
         assert_eq!(loaded.len(), 3);
-        assert_eq!(loaded[0].open_interest_ts_us, 1000);
-        assert_eq!(loaded[1].open_interest_ts_us, 2000);
-        assert_eq!(loaded[2].open_interest_ts_us, 3000);
+        for (i, oi) in loaded.iter().enumerate() {
+            let n = i as u64 + 1;
+            assert_eq!(oi.open_interest_ts_us, n * 1_000_000);
+            assert_eq!(oi.recv_seq, n);
+        }
     }
 
-    // ── Timestamped writer — filename convention ─────────────────────────
+    #[test]
+    fn legacy_five_column_file_reads_with_defaults() {
+        use arrow::{
+            array::{Float64Array, StringArray, UInt64Array},
+            datatypes::{DataType, Field, Schema},
+            record_batch::RecordBatch,
+        };
+        use parquet::{
+            arrow::ArrowWriter, basic::Compression, file::properties::WriterProperties,
+        };
+        use std::{fs::File, sync::Arc};
+
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("legacy_oi.parquet");
+
+        let schema = Schema::new(vec![
+            Field::new("open_interest_ts_us", DataType::UInt64, false),
+            Field::new("symbol", DataType::Utf8, false),
+            Field::new("open_interest", DataType::Float64, false),
+            Field::new("open_interest_value", DataType::Float64, false),
+            Field::new("exchange", DataType::Utf8, false),
+        ]);
+        let batch = RecordBatch::try_new(
+            Arc::new(schema),
+            vec![
+                Arc::new(UInt64Array::from(vec![1_672_304_484_000_000u64])),
+                Arc::new(StringArray::from(vec!["BTC/USDT"])),
+                Arc::new(Float64Array::from(vec![32000.5])),
+                Arc::new(Float64Array::from(vec![752_000_000.0])),
+                Arc::new(StringArray::from(vec!["bybit"])),
+            ],
+        )
+        .unwrap();
+        let file = File::create(&path).unwrap();
+        let props = WriterProperties::builder()
+            .set_compression(Compression::SNAPPY)
+            .build();
+        let mut writer = ArrowWriter::try_new(file, batch.schema(), Some(props)).unwrap();
+        writer.write(&batch).unwrap();
+        writer.close().unwrap();
+
+        let loaded = read_oi_parquet(&path).unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].open_interest, d("32000.5"));
+        assert_eq!(loaded[0].open_interest_value, Some(d("752000000")));
+        assert_eq!(loaded[0].local_oi_ts_us, 0);
+        assert_eq!(loaded[0].recv_seq, 0);
+        assert_eq!(loaded[0].conn_epoch, 0);
+        assert_eq!(loaded[0].mark_px, None);
+    }
 
     #[test]
-    fn test_timestamped_writer_filename_and_mode() {
+    fn timestamped_writer_filename_and_mode() {
         let dir = tempdir().unwrap();
         let records = make_oi_records("bybit");
 
-        // Test with "sync" mode
         let path = write_oi_parquet_timestamped(&records, dir.path(), "sync").unwrap();
         let fname = path.file_name().unwrap().to_str().unwrap();
 
@@ -163,11 +179,9 @@ mod tests {
         );
         assert!(fname.ends_with(".parquet"));
 
-        // Roundtrip
         let loaded = read_oi_parquet(&path).unwrap();
         assert_eq!(loaded.len(), 2);
 
-        // Test with "raw" mode
         let path_raw = write_oi_parquet_timestamped(&records, dir.path(), "raw").unwrap();
         let fname_raw = path_raw.file_name().unwrap().to_str().unwrap();
         assert!(
