@@ -43,10 +43,6 @@ use std::fmt;
 use std::time::Duration;
 use tokio::time::Instant;
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Reconnection policy
-// ─────────────────────────────────────────────────────────────────────────────
-
 /// The three states of the circuit breaker.
 ///
 /// ```text
@@ -125,18 +121,17 @@ pub enum ReconnectAction {
 /// policy.on_connected();
 /// ```
 pub struct ReconnectPolicy {
-    // ── Configuration (immutable after build) ────────────────────────────
     initial_delay: Duration,
     max_delay: Duration,
     max_attempts: Option<u32>,
     jitter_factor: f64,
 
-    // ── Mutable state ────────────────────────────────────────────────────
     current_delay: Duration,
     consecutive_failures: u32,
     circuit_state: CircuitState,
     cooldown_until: Option<Instant>,
     cooldown_duration: Duration,
+    data_ever_received: bool,
 }
 
 impl ReconnectPolicy {
@@ -170,8 +165,9 @@ impl ReconnectPolicy {
     /// where `factor` comes from
     /// [`DisconnectReason::suggested_delay_factor()`].
     pub fn next_action(&mut self, reason: &DisconnectReason) -> ReconnectAction {
-        // ── Non-retryable errors → give up immediately ───────────────────
-        if !reason.is_retryable() {
+        let post_data_protocol_close = self.data_ever_received
+            && matches!(reason, DisconnectReason::ProtocolRejection { code, .. } if *code != 0);
+        if !reason.is_retryable() && !post_data_protocol_close {
             tracing::error!(
                 reason = %reason,
                 "reconnect.non_retryable"
@@ -180,8 +176,13 @@ impl ReconnectPolicy {
                 reason: format!("{reason}"),
             };
         }
+        if post_data_protocol_close {
+            tracing::warn!(
+                reason = %reason,
+                "reconnect.post_data_protocol_close_retrying"
+            );
+        }
 
-        // ── Circuit breaker check ────────────────────────────────────────
         match self.circuit_state {
             CircuitState::Open => {
                 if let Some(until) = self.cooldown_until
@@ -194,14 +195,13 @@ impl ReconnectPolicy {
                     );
                     return ReconnectAction::CircuitOpen { until };
                 }
-                // Cooldown expired → transition to HalfOpen
+
                 self.circuit_state = CircuitState::HalfOpen;
                 tracing::info!("reconnect.circuit_half_open");
-                // Allow one probe with initial delay
+
                 return ReconnectAction::RetryAfter(self.initial_delay);
             }
             CircuitState::HalfOpen => {
-                // Probe failed — re-open with doubled cooldown
                 self.cooldown_duration =
                     (self.cooldown_duration * 2).min(self.max_delay * 8);
                 self.cooldown_until = Some(Instant::now() + self.cooldown_duration);
@@ -214,21 +214,17 @@ impl ReconnectPolicy {
                     until: self.cooldown_until.unwrap(),
                 };
             }
-            CircuitState::Closed => { /* normal path — continue below */ }
+            CircuitState::Closed => {}
         }
 
-        // ── Immediate retry for CleanClose ───────────────────────────────
         let factor = reason.suggested_delay_factor();
         if factor == 0.0 {
-            // Don't increment failures for clean closes
             tracing::info!(reason = %reason, "reconnect.retry_immediately");
             return ReconnectAction::RetryImmediately;
         }
 
-        // ── Increment failure counter ────────────────────────────────────
         self.consecutive_failures += 1;
 
-        // ── Max-attempts check → open circuit ────────────────────────────
         if let Some(max) = self.max_attempts
             && self.consecutive_failures >= max
         {
@@ -247,7 +243,6 @@ impl ReconnectPolicy {
             };
         }
 
-        // ── Compute jittered delay ───────────────────────────────────────
         let base_ms = self.current_delay.as_millis() as f64 * factor;
         let jitter_ms = if self.jitter_factor > 0.0 {
             rand::rng().random_range(0.0..base_ms * self.jitter_factor)
@@ -265,7 +260,6 @@ impl ReconnectPolicy {
             "reconnect.backoff"
         );
 
-        // ── Advance base delay for next iteration ────────────────────────
         self.current_delay = (self.current_delay * 2).min(self.max_delay);
 
         ReconnectAction::RetryAfter(delay)
@@ -297,6 +291,16 @@ impl ReconnectPolicy {
     /// continuing an escalated sequence.
     pub fn on_message_received(&mut self) {
         self.current_delay = self.initial_delay;
+        self.data_ever_received = true;
+    }
+
+    /// Whether this connection ever carried a real message.
+    ///
+    /// A subscription that delivered data cannot later be rejected as invalid,
+    /// so a post-data protocol close is a liveness fault (keepalive lapse,
+    /// venue-side recycle) rather than a terminal rejection.
+    pub fn data_ever_received(&self) -> bool {
+        self.data_ever_received
     }
 }
 
@@ -378,13 +382,10 @@ impl ReconnectPolicyBuilder {
             circuit_state: CircuitState::Closed,
             cooldown_until: None,
             cooldown_duration: self.max_delay * 4,
+            data_ever_received: false,
         }
     }
 }
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Connection health monitoring
-// ─────────────────────────────────────────────────────────────────────────────
 
 /// Stale-connection detector.
 ///
@@ -513,8 +514,6 @@ mod tests {
 
     #[test]
     fn backoff_escalates_and_caps_at_max_delay() {
-        // GoingAway has factor 1.0, so each delay equals the current base
-        // delay, which doubles per failure and caps at max_delay.
         let mut p = no_jitter(1_000, 30_000, None);
         let got: Vec<u64> = (0..7)
             .map(|_| retry_after(p.next_action(&going_away())).as_millis() as u64)
@@ -528,8 +527,6 @@ mod tests {
 
     #[test]
     fn jitter_stays_within_envelope() {
-        // With jitter_factor 0.5 the first delay is drawn from [base, base*1.5).
-        // rand is unseeded, so assert the bound over many fresh policies.
         for _ in 0..200 {
             let mut p = ReconnectPolicy::builder()
                 .initial_delay(Duration::from_millis(1_000))
@@ -551,8 +548,7 @@ mod tests {
         p.on_connected();
         assert_eq!(p.consecutive_failures(), 0);
         assert_eq!(p.circuit_state(), CircuitState::Closed);
-        // Base delay is back to initial: the next failure yields the first-rung
-        // delay, not a continuation of the escalated ladder.
+
         assert_eq!(
             retry_after(p.next_action(&going_away())).as_millis() as u64,
             1_000
@@ -560,9 +556,42 @@ mod tests {
     }
 
     #[test]
+    fn post_data_protocol_close_retries_instead_of_giving_up() {
+        let mut p = ReconnectPolicy::builder().build();
+        let ping_expired = DisconnectReason::ProtocolRejection {
+            code: 1003,
+            reason: "ping check expired".into(),
+        };
+        assert!(matches!(
+            p.next_action(&ping_expired),
+            ReconnectAction::GiveUp { .. }
+        ));
+        p.on_message_received();
+        assert!(
+            matches!(
+                p.next_action(&ping_expired),
+                ReconnectAction::RetryAfter(_) | ReconnectAction::RetryImmediately
+            ),
+            "a subscription that delivered data cannot be rejected as invalid"
+        );
+    }
+
+    #[test]
+    fn application_rejection_stays_terminal_even_after_data() {
+        let mut p = ReconnectPolicy::builder().build();
+        p.on_message_received();
+        let rejected = DisconnectReason::ProtocolRejection {
+            code: 0,
+            reason: "unknown symbol".into(),
+        };
+        assert!(
+            matches!(p.next_action(&rejected), ReconnectAction::GiveUp { .. }),
+            "code 0 is an application-level rejection and must stay terminal"
+        );
+    }
+
+    #[test]
     fn on_message_received_resets_delay_but_not_failures() {
-        // This is exactly why on_connected is needed in the worker loop:
-        // a live stream resets the backoff ladder but NOT the failure counter.
         let mut p = no_jitter(1_000, 30_000, Some(10));
         p.next_action(&going_away());
         p.next_action(&going_away());
@@ -570,12 +599,12 @@ mod tests {
         assert_eq!(p.consecutive_failures(), 3);
 
         p.on_message_received();
-        // Delay ladder reset ...
+
         assert_eq!(
             retry_after(p.next_action(&going_away())).as_millis() as u64,
             1_000
         );
-        // ... but failures kept climbing (now 4).
+
         assert_eq!(p.consecutive_failures(), 4);
     }
 
@@ -590,7 +619,7 @@ mod tests {
             p.next_action(&going_away()),
             ReconnectAction::RetryAfter(_)
         ));
-        // Third failure hits max_attempts → circuit opens.
+
         assert!(matches!(
             p.next_action(&going_away()),
             ReconnectAction::CircuitOpen { .. }
@@ -620,27 +649,19 @@ mod tests {
 
     #[tokio::test]
     async fn circuit_transitions_open_half_open_reopen() {
-        // Tiny delays so the real cooldown is a few ms.
         let mut p = no_jitter(1, 1, Some(1));
-        // One failure hits max_attempts(1) → Open, cooldown = max_delay * 4.
+
         assert!(matches!(
             p.next_action(&transport()),
             ReconnectAction::CircuitOpen { .. }
         ));
         assert_eq!(p.circuit_state(), CircuitState::Open);
 
-        // While the cooldown is live, the circuit stays open.
         assert!(matches!(
             p.next_action(&transport()),
             ReconnectAction::CircuitOpen { .. }
         ));
 
-        // After the cooldown expires, one probe is allowed (HalfOpen).
-        // The cooldown compares against `Instant::now()` sampled *inside*
-        // `next_action`, so tokio::time::pause/advance cannot drive this branch
-        // deterministically; we instead wait in real time with a wide margin —
-        // the cooldown here is only max_delay(1ms) * 4 = 4ms, so 200ms is a
-        // generous, non-racy bound that guarantees expiry on any loaded CI.
         tokio::time::sleep(Duration::from_millis(200)).await;
         assert!(matches!(
             p.next_action(&transport()),
@@ -648,7 +669,6 @@ mod tests {
         ));
         assert_eq!(p.circuit_state(), CircuitState::HalfOpen);
 
-        // A failure during the probe re-opens with a doubled cooldown.
         assert!(matches!(
             p.next_action(&transport()),
             ReconnectAction::CircuitOpen { .. }
@@ -658,12 +678,6 @@ mod tests {
 
     #[tokio::test]
     async fn health_monitor_detects_and_clears_staleness() {
-        // `is_stale()` compares the configured timeout against a freshly
-        // sampled `Instant::now()`, so tokio::time::pause/advance cannot drive
-        // it deterministically; we wait in real time instead. A 50ms timeout
-        // paired with a 200ms sleep leaves a 150ms margin for the "stale"
-        // check, while the 50ms timeout gives the post-reset "not stale" check
-        // ample slack before the deadline — both bounds are far from racy.
         let mut h = HealthMonitor::new(Duration::from_millis(50));
         assert!(!h.is_stale());
         tokio::time::sleep(Duration::from_millis(200)).await;
