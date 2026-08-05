@@ -182,9 +182,16 @@ impl DataWorker {
             config.output.clone()
         };
 
-        let mut sinks =
-            build_sinks(&raw_output, raw_registry, None, None, terminal_cb, None)
-                .map_err(|e| ConnectError::Sink(e.to_string()))?;
+        let mut sinks = build_sinks(
+            &raw_output,
+            raw_registry,
+            None,
+            None,
+            terminal_cb,
+            None,
+            config.common.datatypes.declared_set(),
+        )
+        .map_err(|e| ConnectError::Sink(e.to_string()))?;
 
         let domain_registry = if framework && has_channel {
             let reg = DomainTopicRegistry::from_config(
@@ -571,11 +578,13 @@ impl DataWorker {
         let metrics = crate::framework::budget::SourceMetrics::default();
 
         // Reconnect loop: the adapter ending (disconnect / gap resubscribe) re-
+        let declared_set = self.core.datatypes().declared_set();
         // establishes the socket; shutdown / Stop exits.
         while !stopped && !*shutdown.borrow() {
             let (dev_tx, mut dev_rx) = mpsc::channel(channel_capacity);
             let adapter_handle = adapter.spawn(
                 vec![symbol.clone()],
+                declared_set.clone(),
                 dev_tx,
                 shutdown.clone(),
                 metrics.clone(),

@@ -118,6 +118,21 @@ fn seeding_taxonomy(desc: &VenueConformance) -> Outcome {
             model.seeds_out_of_band()
         ));
     }
+    if model.supports_in_band_reseed() && !model.seeds_out_of_band() {
+        return Outcome::Fail(
+            "in-band reseed declared on a model whose seed is not out-of-band".into(),
+        );
+    }
+    if model.seq_is_connection_scoped() && model.replay_dedup_sound() {
+        return Outcome::Fail(
+            "connection-scoped sequence cannot make buffered-replay dedup sound".into(),
+        );
+    }
+    if model.replay_dedup_sound() && model.snapshot_source().is_none() {
+        return Outcome::Fail(
+            "replay dedup declared sound on a model that never seeds".into(),
+        );
+    }
     Outcome::Pass
 }
 
@@ -795,6 +810,7 @@ fn book_runtime_replay(desc: &VenueConformance) -> Outcome {
             model.clone(),
             model.recovery_action(),
             metrics.clone(),
+            aetelier_connect::framework::protocol::DeclaredSet::all(),
         );
         let (ev_tx, ev_rx) = tokio::sync::mpsc::channel(events.len() + 1);
         for ev in events {
@@ -841,6 +857,20 @@ fn book_runtime_replay(desc: &VenueConformance) -> Outcome {
     })
 }
 
+fn datatype_isolation(desc: &VenueConformance) -> Outcome {
+    if !desc.datatype_isolation_done {
+        return Outcome::NotApplicable(
+            "declared-datatype subscribe filtering (C1) not yet enforced for this venue"
+                .into(),
+        );
+    }
+    Outcome::Fail(
+        "datatype_isolation_done flipped but the C1 assertions are not wired yet — \
+         implement the declared-set subscribe/runtime checks before flipping"
+            .into(),
+    )
+}
+
 /// The kinds registry. Adding an entry here ratchets the kind to every venue
 /// via `conformance_suite!`.
 pub const KINDS: &[Kind] = &[
@@ -849,6 +879,12 @@ pub const KINDS: &[Kind] = &[
         atlas: "DAT-OB-S-5/S-6 seed race + Buffering, replayed through the REAL SourceRuntime",
         invariants: &[],
         run: book_runtime_replay,
+    },
+    Kind {
+        name: "datatype_isolation",
+        atlas: "declared-datatype isolation (C1/C6): disabled datatypes yield no channels and no events",
+        invariants: &[],
+        run: datatype_isolation,
     },
     Kind {
         name: "decode_surface",

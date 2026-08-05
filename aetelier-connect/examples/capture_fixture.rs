@@ -85,7 +85,10 @@ async fn main() {
     let write = Arc::new(Mutex::new(write));
 
     // Subscribe with the adapter's own frames immediately.
-    for frame in hooks.subscribe_frames(std::slice::from_ref(&symbol)) {
+    for frame in hooks.subscribe_frames(
+        std::slice::from_ref(&symbol),
+        &aetelier_connect::framework::protocol::DeclaredSet::all(),
+    ) {
         write
             .lock()
             .await

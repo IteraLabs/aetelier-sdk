@@ -68,6 +68,10 @@ pub struct VenueConformance {
     /// Whether this venue is flagged DONE: its full kinds matrix must be green
     /// (no Fail, and every applicable kind Pass) for the meta-test to pass.
     pub done: bool,
+    /// Whether the adapter's subscribe path honors the declared-datatype set
+    /// (C1 of the datatype-isolation plan). Until true, the
+    /// `datatype_isolation` kind reports NotApplicable for the venue.
+    pub datatype_isolation_done: bool,
 }
 
 /// The outcome of running one kind against one venue.

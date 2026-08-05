@@ -34,6 +34,7 @@ const BINANCE: VenueConformance = VenueConformance {
     rest_fixture: Some("binance/btcusdt_rest_snapshot.json"),
     expect_classes: &[Class::Book, Class::Trade],
     done: true,
+    datatype_isolation_done: false,
 };
 
 // OKX and Kraken: ChecksumDelta venues (CRC32 continuity, no REST seed,
@@ -52,6 +53,7 @@ const OKX: VenueConformance = VenueConformance {
     rest_fixture: None,
     expect_classes: &[Class::Book, Class::Trade],
     done: true,
+    datatype_isolation_done: false,
 };
 
 const KRAKEN: VenueConformance = VenueConformance {
@@ -65,6 +67,7 @@ const KRAKEN: VenueConformance = VenueConformance {
     rest_fixture: None,
     expect_classes: &[Class::Book, Class::Trade],
     done: true,
+    datatype_isolation_done: false,
 };
 
 // Cycle #3: Coinbase, Bybit, Gate.io — self-seed venues with book + trade
@@ -81,6 +84,7 @@ const COINBASE: VenueConformance = VenueConformance {
     rest_fixture: None,
     expect_classes: &[Class::Book, Class::Trade],
     done: true,
+    datatype_isolation_done: false,
 };
 
 const BYBIT: VenueConformance = VenueConformance {
@@ -94,6 +98,7 @@ const BYBIT: VenueConformance = VenueConformance {
     rest_fixture: None,
     expect_classes: &[Class::Book, Class::Trade],
     done: true,
+    datatype_isolation_done: false,
 };
 
 const GATEIO: VenueConformance = VenueConformance {
@@ -107,6 +112,7 @@ const GATEIO: VenueConformance = VenueConformance {
     rest_fixture: None,
     expect_classes: &[Class::Book, Class::Trade],
     done: true,
+    datatype_isolation_done: false,
 };
 
 // Cycle #4 (self-seed subset): bitget, poloniex (SeqDelta ExactPrev), upbit
@@ -123,6 +129,7 @@ const BITGET: VenueConformance = VenueConformance {
     rest_fixture: None,
     expect_classes: &[Class::Book, Class::Trade],
     done: true,
+    datatype_isolation_done: false,
 };
 const POLONIEX: VenueConformance = VenueConformance {
     venue: "poloniex",
@@ -135,6 +142,7 @@ const POLONIEX: VenueConformance = VenueConformance {
     rest_fixture: None,
     expect_classes: &[Class::Book, Class::Trade],
     done: true,
+    datatype_isolation_done: false,
 };
 const UPBIT: VenueConformance = VenueConformance {
     venue: "upbit",
@@ -147,6 +155,7 @@ const UPBIT: VenueConformance = VenueConformance {
     rest_fixture: None,
     expect_classes: &[Class::Book, Class::Trade],
     done: true,
+    datatype_isolation_done: false,
 };
 const HTX: VenueConformance = VenueConformance {
     venue: "htx",
@@ -162,6 +171,7 @@ const HTX: VenueConformance = VenueConformance {
     // buffer-and-reconcile path.
     expect_classes: &[Class::Book, Class::Trade],
     done: true,
+    datatype_isolation_done: false,
 };
 
 // Cycle #4 (REST/L3-seeded): bitso (L3 diff-orders, seeded 0-based from a REST
@@ -180,6 +190,7 @@ const BITSO: VenueConformance = VenueConformance {
     rest_fixture: Some("bitso/btcmxn_rest_l3.json"),
     expect_classes: &[Class::Book, Class::Trade],
     done: true,
+    datatype_isolation_done: false,
 };
 // KuCoin: RangeInclusive REST-seed. The seed (level2 snapshot) is captured
 // mid-stream so its sequence lands inside the buffered delta window — the
@@ -195,6 +206,7 @@ const KUCOIN: VenueConformance = VenueConformance {
     rest_fixture: Some("kucoin/btcusdt_rest_l2.json"),
     expect_classes: &[Class::Book, Class::Trade],
     done: true,
+    datatype_isolation_done: false,
 };
 
 /// Instantiate every kind in `kinds::KINDS` as a named `#[test]` for one
@@ -239,6 +251,10 @@ macro_rules! conformance_suite {
             #[test]
             fn book_runtime_replay() {
                 harness::assert_kind(&$desc, kind("book_runtime_replay"));
+            }
+            #[test]
+            fn datatype_isolation() {
+                harness::assert_kind(&$desc, kind("datatype_isolation"));
             }
             #[test]
             fn book_invariants() {

@@ -22,6 +22,7 @@ use crate::framework::driver::{DEFAULT_RAW_BUFFER, drive};
 use crate::framework::model::{
     DomainEvent, Normalizer, ReconstructionModel, SeqPredicate, SnapshotSource,
 };
+use crate::framework::protocol::DeclaredSet;
 use crate::framework::protocol::{Heartbeat, ProtocolHooks};
 use crate::framework::registry::{ExchangeAdapter, ExchangeProfile, TaskExit};
 use crate::framework::symbol::SymbolCodec;
@@ -104,7 +105,11 @@ impl ProtocolHooks for CoinbaseHooks {
     /// `symbols` are venue wire symbols (`"BTC-USD"`, Hyphen codec). Advanced
     /// Trade rejects a single frame that mixes channels, so every channel is
     /// subscribed with its own frame.
-    fn subscribe_frames(&self, symbols: &[String]) -> Vec<Message> {
+    fn subscribe_frames(
+        &self,
+        symbols: &[String],
+        _declared: &DeclaredSet,
+    ) -> Vec<Message> {
         let sub = |channel: &str| {
             let frame = serde_json::json!({
                 "type": "subscribe",
@@ -489,6 +494,7 @@ impl ExchangeAdapter for CoinbaseAdapter {
     fn spawn(
         &self,
         symbols: Vec<String>,
+        declared: DeclaredSet,
         tx: mpsc::Sender<DomainEvent>,
         shutdown: watch::Receiver<bool>,
         metrics: SourceMetrics,
@@ -503,6 +509,7 @@ impl ExchangeAdapter for CoinbaseAdapter {
             tokio::spawn(drive::<CoinbaseHooks, CoinbaseDecoder, CoinbaseNormalizer>(
                 Arc::new(CoinbaseHooks::level2()),
                 symbols.clone(),
+                declared.clone(),
                 CoinbaseNormalizer::sequence_tracked(metrics.clone()),
                 tx.clone(),
                 shutdown.clone(),
@@ -513,6 +520,7 @@ impl ExchangeAdapter for CoinbaseAdapter {
             tokio::spawn(drive::<CoinbaseHooks, CoinbaseDecoder, CoinbaseNormalizer>(
                 Arc::new(CoinbaseHooks::trades()),
                 symbols,
+                declared,
                 CoinbaseNormalizer::passthrough(metrics.clone()),
                 tx,
                 shutdown.clone(),
@@ -730,7 +738,8 @@ mod tests {
     fn subscribe_frames_split_by_socket_role() {
         // Book socket: level2 + heartbeats (the contiguity anchor), one frame
         // per channel, each carrying the product_ids array.
-        let frames = CoinbaseHooks::level2().subscribe_frames(&["BTC-USD".to_string()]);
+        let frames = CoinbaseHooks::level2()
+            .subscribe_frames(&["BTC-USD".to_string()], &DeclaredSet::all());
         assert_eq!(frames.len(), 2);
         let Message::Text(book) = &frames[0] else {
             panic!("expected a text frame");
@@ -748,7 +757,8 @@ mod tests {
 
         // Trade socket: market_trades only — a trade frame must never advance
         // the book socket's sequence arithmetic.
-        let frames = CoinbaseHooks::trades().subscribe_frames(&["BTC-USD".to_string()]);
+        let frames = CoinbaseHooks::trades()
+            .subscribe_frames(&["BTC-USD".to_string()], &DeclaredSet::all());
         assert_eq!(frames.len(), 1);
         let Message::Text(trades) = &frames[0] else {
             panic!("expected a text frame");

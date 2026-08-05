@@ -82,15 +82,21 @@ pub(crate) fn rtt_ewma_us(prev_us: u64, sample_us: u64) -> u64 {
 pub struct WssTransport<H: ProtocolHooks, D: WssDecoder> {
     hooks: Arc<H>,
     symbols: Vec<String>,
+    declared: aetelier_types::config::markets::market_config::DeclaredSet,
     _decoder: PhantomData<fn() -> D>,
 }
 
 impl<H: ProtocolHooks, D: WssDecoder> WssTransport<H, D> {
     /// Build a transport for `symbols` using the venue's protocol `hooks`.
-    pub fn new(hooks: Arc<H>, symbols: Vec<String>) -> Self {
+    pub fn new(
+        hooks: Arc<H>,
+        symbols: Vec<String>,
+        declared: aetelier_types::config::markets::market_config::DeclaredSet,
+    ) -> Self {
         Self {
             hooks,
             symbols,
+            declared,
             _decoder: PhantomData,
         }
     }
@@ -152,13 +158,37 @@ impl<H: ProtocolHooks, D: WssDecoder> WssTransport<H, D> {
         let writer = Arc::new(Mutex::new(writer_half));
 
         // 3. Subscribe (+ any extra bootstrap frames, e.g. HTX REQ seed).
-        let mut frames = self.hooks.subscribe_frames(&self.symbols);
-        frames.extend(prepared.extra_frames);
+        let mut frames = self.hooks.subscribe_frames(&self.symbols, &self.declared);
+        let held_extras = match prepared.extra_frames_delay {
+            Some(delay) if !prepared.extra_frames.is_empty() => {
+                Some((prepared.extra_frames, delay))
+            }
+            _ => {
+                frames.extend(prepared.extra_frames);
+                None
+            }
+        };
         for frame in frames {
             if let Err(e) = writer.lock().await.send(frame).await {
                 return WssExitReason::Transport(e);
             }
         }
+        let extras_handle = held_extras.map(|(extras, delay)| {
+            let w = writer.clone();
+            tokio::spawn(async move {
+                sleep(delay).await;
+                for frame in extras {
+                    if w.lock().await.send(frame).await.is_err() {
+                        warn!("framework.wss.delayed_extra_frame_send_failed");
+                        return;
+                    }
+                }
+                info!(
+                    delay_ms = delay.as_millis() as u64,
+                    "framework.wss.extra_frames_sent"
+                );
+            })
+        });
 
         // 4. Heartbeat task (prepare may override the strategy/cadence). A
         // write failure flips `hb_dead` so the read loop reconnects instead of
@@ -358,6 +388,9 @@ impl<H: ProtocolHooks, D: WssDecoder> WssTransport<H, D> {
         if let Some(h) = hb_handle {
             h.abort();
         }
+        if let Some(h) = extras_handle {
+            h.abort();
+        }
         rtt_ping_handle.abort();
         exit
     }
@@ -366,6 +399,8 @@ impl<H: ProtocolHooks, D: WssDecoder> WssTransport<H, D> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::framework::protocol::DeclaredSet as Prepared_DS;
+    use crate::framework::protocol::Prepared;
 
     #[test]
     fn pre_data_ack_rejection_is_terminal_post_data_is_retryable() {
@@ -413,7 +448,11 @@ mod tests {
         fn endpoint(&self) -> String {
             self.0.clone()
         }
-        fn subscribe_frames(&self, _symbols: &[String]) -> Vec<Message> {
+        fn subscribe_frames(
+            &self,
+            _symbols: &[String],
+            _declared: &Prepared_DS,
+        ) -> Vec<Message> {
             Vec::new()
         }
     }
@@ -427,6 +466,87 @@ mod tests {
         ) -> Result<Option<Self::Event>, Box<crate::errors::ExchangeError>> {
             Ok(Some(text.to_string()))
         }
+    }
+
+    struct DelayedExtrasHooks(String);
+
+    #[async_trait::async_trait]
+    impl ProtocolHooks for DelayedExtrasHooks {
+        fn endpoint(&self) -> String {
+            self.0.clone()
+        }
+        fn subscribe_frames(
+            &self,
+            _symbols: &[String],
+            _declared: &Prepared_DS,
+        ) -> Vec<Message> {
+            vec![Message::Text("sub".into())]
+        }
+        async fn prepare(&self) -> Result<Prepared, crate::errors::ExchangeError> {
+            Ok(Prepared {
+                extra_frames: vec![Message::Text("req".into())],
+                extra_frames_delay: Some(Duration::from_millis(300)),
+                ..Default::default()
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn delayed_extra_frames_trail_the_subscribe() {
+        use futures_util::{SinkExt as _, StreamExt as _};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (seen_tx, mut seen_rx) = mpsc::channel::<(String, std::time::Instant)>(8);
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            while let Some(Ok(msg)) = ws.next().await {
+                if let Message::Text(t) = msg {
+                    let _ = seen_tx
+                        .send((t.to_string(), std::time::Instant::now()))
+                        .await;
+                }
+            }
+            let _ = ws.close(None).await;
+        });
+
+        let transport = WssTransport::<DelayedExtrasHooks, NoopDecoder>::new(
+            Arc::new(DelayedExtrasHooks(format!("ws://{addr}"))),
+            vec!["TEST".to_string()],
+            Prepared_DS::all(),
+        );
+        let (tx, _rx) = mpsc::channel(8);
+        let run = tokio::spawn(async move {
+            transport
+                .run_with_deadlines(
+                    tx,
+                    Arc::new(AtomicU64::new(0)),
+                    SourceMetrics::default(),
+                    Duration::from_secs(5),
+                    Duration::from_secs(5),
+                )
+                .await
+        });
+
+        let (first, t_first) =
+            tokio::time::timeout(Duration::from_secs(3), seen_rx.recv())
+                .await
+                .unwrap()
+                .unwrap();
+        let (second, t_second) =
+            tokio::time::timeout(Duration::from_secs(3), seen_rx.recv())
+                .await
+                .unwrap()
+                .unwrap();
+        run.abort();
+
+        assert_eq!(first, "sub", "subscribe goes out immediately");
+        assert_eq!(second, "req", "held extras follow");
+        let gap = t_second.duration_since(t_first);
+        assert!(
+            gap >= Duration::from_millis(250),
+            "extras must trail by ~the configured delay, gap was {gap:?}"
+        );
     }
 
     #[tokio::test]
@@ -445,6 +565,7 @@ mod tests {
         let transport = WssTransport::<SilentHooks, NoopDecoder>::new(
             Arc::new(SilentHooks(format!("ws://{addr}"))),
             vec!["TEST".to_string()],
+            Prepared_DS::all(),
         );
         let (tx, _rx) = mpsc::channel(8);
         let exit = transport
@@ -469,6 +590,7 @@ mod tests {
         let transport = WssTransport::<SilentHooks, NoopDecoder>::new(
             Arc::new(SilentHooks("ws://203.0.113.1:9".to_string())),
             vec!["TEST".to_string()],
+            Prepared_DS::all(),
         );
         let (tx, _rx) = mpsc::channel(8);
         let exit = transport

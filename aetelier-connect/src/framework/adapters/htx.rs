@@ -29,6 +29,7 @@ use crate::framework::model::{
     DomainEvent, Normalizer, ReconstructionModel, SeqPredicate, SnapshotSource,
     epoch_to_us,
 };
+use crate::framework::protocol::DeclaredSet;
 use crate::framework::protocol::{
     ControlAction, FrameCodec, Heartbeat, Prepared, ProtocolHooks,
 };
@@ -85,7 +86,11 @@ impl ProtocolHooks for HtxHooks {
     }
 
     /// One `sub` frame per `(symbol × {mbp, trade})` topic.
-    fn subscribe_frames(&self, symbols: &[String]) -> Vec<Message> {
+    fn subscribe_frames(
+        &self,
+        symbols: &[String],
+        _declared: &DeclaredSet,
+    ) -> Vec<Message> {
         let mut frames = Vec::with_capacity(symbols.len() * 2);
         for s in symbols {
             frames.push(Message::Text(
@@ -136,6 +141,7 @@ impl ProtocolHooks for HtxHooks {
             .collect();
         Ok(Prepared {
             extra_frames,
+            extra_frames_delay: Some(std::time::Duration::from_secs(3)),
             ..Default::default()
         })
     }
@@ -299,6 +305,7 @@ impl ExchangeAdapter for HtxAdapter {
     fn spawn(
         &self,
         symbols: Vec<String>,
+        declared: DeclaredSet,
         tx: mpsc::Sender<DomainEvent>,
         shutdown: watch::Receiver<bool>,
         metrics: SourceMetrics,
@@ -309,6 +316,7 @@ impl ExchangeAdapter for HtxAdapter {
         tokio::spawn(drive::<HtxHooks, HtxDecoder, HtxNormalizer>(
             hooks,
             symbols,
+            declared,
             HtxNormalizer {
                 metrics: metrics.clone(),
             },
@@ -414,6 +422,11 @@ mod tests {
         };
         let prepared = hooks.prepare().await.unwrap();
         assert_eq!(prepared.extra_frames.len(), 2);
+        assert_eq!(
+            prepared.extra_frames_delay,
+            Some(std::time::Duration::from_secs(3)),
+            "REQ must trail the subscribe so the reply lands inside the buffered range"
+        );
         let Message::Text(first) = &prepared.extra_frames[0] else {
             panic!("expected text REQ frame");
         };

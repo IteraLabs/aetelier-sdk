@@ -28,6 +28,7 @@ use crate::workers::topic_publisher::{
     DEFAULT_SNAPSHOT_CHANNEL_CAPACITY, DomainTopicMessage, DomainTopicRegistry,
     SnapshotChannel, TopicMessage, TopicRegistry,
 };
+use aetelier_types::config::markets::market_config::DeclaredSet as DeclaredSetAlias;
 use aetelier_types::snapshots::MarketSnapshot;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -646,6 +647,8 @@ pub struct BufferedSink {
     dropped_snapshots: AtomicU64,
     /// Optional callback fired after each successful flush.
     flush_callback: Option<BufferedSinkFlushCallback>,
+    declared: DeclaredSetAlias,
+    undeclared_stripped: AtomicU64,
 }
 
 /// Hard cap on buffered snapshots before the oldest are dropped. At the 250 ms
@@ -668,7 +671,74 @@ impl BufferedSink {
             flush_failures: AtomicU64::new(0),
             dropped_snapshots: AtomicU64::new(0),
             flush_callback: None,
+            declared: DeclaredSetAlias::all(),
+            undeclared_stripped: AtomicU64::new(0),
         }
+    }
+
+    pub fn with_declared(mut self, declared: DeclaredSetAlias) -> Self {
+        self.declared = declared;
+        self
+    }
+
+    pub fn total_undeclared_stripped(&self) -> u64 {
+        self.undeclared_stripped.load(Ordering::Relaxed)
+    }
+
+    fn strip_undeclared(&self, snapshot: &MarketSnapshot) -> MarketSnapshot {
+        use aetelier_types::config::markets::market_config::DeclaredDatatype as DD;
+        let mut out = snapshot.clone();
+        let mut stripped = 0u64;
+        for dt in DD::ALL {
+            if self.declared.contains(dt) {
+                continue;
+            }
+            match dt {
+                DD::Orderbook => {
+                    if out.orderbook.take().is_some() {
+                        stripped += 1;
+                    }
+                }
+                DD::Trades => {
+                    if !out.trades.is_empty() {
+                        stripped += out.trades.len() as u64;
+                        out.trades.clear();
+                    }
+                }
+                DD::Liquidations => {
+                    if !out.liquidations.is_empty() {
+                        stripped += out.liquidations.len() as u64;
+                        out.liquidations.clear();
+                    }
+                }
+                DD::FundingRates => {
+                    if !out.funding_rate.is_empty() {
+                        stripped += out.funding_rate.len() as u64;
+                        out.funding_rate.clear();
+                    }
+                }
+                DD::OpenInterest => {
+                    if !out.open_interest.is_empty() {
+                        stripped += out.open_interest.len() as u64;
+                        out.open_interest.clear();
+                    }
+                }
+            }
+        }
+        if stripped > 0 {
+            let total = self
+                .undeclared_stripped
+                .fetch_add(stripped, Ordering::Relaxed)
+                + stripped;
+            if total == stripped {
+                tracing::warn!(
+                    dir = self.output_dir.as_str(),
+                    stripped,
+                    "buffered_sink.undeclared_datatypes_stripped"
+                );
+            }
+        }
+        out
     }
 
     /// Count of failed flush batches (buffer retained for retry).
@@ -720,6 +790,7 @@ impl OutputSink for BufferedSink {
 
     fn emit_snapshot(&self, snapshot: &MarketSnapshot) -> anyhow::Result<()> {
         self.events_emitted.fetch_add(1, Ordering::Relaxed);
+        let snapshot = self.strip_undeclared(snapshot);
         let mut buf = self.snapshot_buffer.lock().unwrap();
         if buf.len() >= MAX_BUFFERED_SNAPSHOTS {
             // A sustained flush outage would otherwise grow the buffer without
@@ -737,7 +808,7 @@ impl OutputSink for BufferedSink {
                 "buffered_sink.buffer_full_dropping_oldest"
             );
         }
-        buf.push(snapshot.clone());
+        buf.push(snapshot);
         Ok(())
     }
 
@@ -960,6 +1031,7 @@ pub fn build_sinks(
     flusher: Option<Box<dyn SnapshotFlusher>>,
     terminal_cb: Option<TerminalEventCallback>,
     flush_cb: Option<BufferedSinkFlushCallback>,
+    declared: aetelier_types::config::markets::market_config::DeclaredSet,
 ) -> anyhow::Result<OutputSinkSet> {
     let mut set = OutputSinkSet::new();
     let mut registry = registry;
@@ -1009,7 +1081,8 @@ pub fn build_sinks(
                 let sink = match flush_cb.take() {
                     Some(cb) => BufferedSink::with_flush_callback(dir.clone(), f, cb),
                     None => BufferedSink::new(dir.clone(), f),
-                };
+                }
+                .with_declared(declared.clone());
                 set.push(Box::new(sink));
             }
         }
@@ -1143,6 +1216,7 @@ mod tests {
             None,
             None,
             None,
+            DeclaredSetAlias::all(),
         )
         .unwrap();
         let mut rx = snaps.subscribe();
@@ -1163,6 +1237,7 @@ mod tests {
             None,
             None,
             None,
+            DeclaredSetAlias::all(),
         );
         let err = match result {
             Ok(_) => panic!(

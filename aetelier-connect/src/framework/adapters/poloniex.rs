@@ -26,6 +26,7 @@ use crate::framework::model::{
     DomainEvent, Normalizer, ReconstructionModel, SeqPredicate, SnapshotSource,
     epoch_to_us,
 };
+use crate::framework::protocol::DeclaredSet;
 use crate::framework::protocol::{Heartbeat, ProtocolHooks};
 use crate::framework::registry::{ExchangeAdapter, ExchangeProfile, TaskExit};
 use crate::framework::symbol::SymbolCodec;
@@ -61,7 +62,11 @@ impl ProtocolHooks for PoloniexHooks {
 
     /// Two frames: one for `book_lv2`, one for `trades`, each carrying the full
     /// symbol set. Symbols are venue wire symbols (`"BTC_USDT"`).
-    fn subscribe_frames(&self, symbols: &[String]) -> Vec<Message> {
+    fn subscribe_frames(
+        &self,
+        symbols: &[String],
+        _declared: &DeclaredSet,
+    ) -> Vec<Message> {
         let book = serde_json::json!({
             "event": "subscribe",
             "channel": ["book_lv2"],
@@ -236,6 +241,7 @@ impl ExchangeAdapter for PoloniexAdapter {
     fn spawn(
         &self,
         symbols: Vec<String>,
+        declared: DeclaredSet,
         tx: mpsc::Sender<DomainEvent>,
         shutdown: watch::Receiver<bool>,
         metrics: SourceMetrics,
@@ -243,6 +249,7 @@ impl ExchangeAdapter for PoloniexAdapter {
         tokio::spawn(drive::<PoloniexHooks, PoloniexDecoder, PoloniexNormalizer>(
             Arc::new(PoloniexHooks),
             symbols,
+            declared,
             PoloniexNormalizer {
                 metrics: metrics.clone(),
             },
@@ -365,7 +372,8 @@ mod tests {
 
     #[test]
     fn subscribe_emits_book_and_trade_frames() {
-        let frames = PoloniexHooks.subscribe_frames(&["BTC_USDT".to_string()]);
+        let frames = PoloniexHooks
+            .subscribe_frames(&["BTC_USDT".to_string()], &DeclaredSet::all());
         assert_eq!(frames.len(), 2);
         let Message::Text(book) = &frames[0] else {
             panic!("expected a text frame");

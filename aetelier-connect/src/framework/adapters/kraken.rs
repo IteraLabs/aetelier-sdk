@@ -17,6 +17,7 @@ use crate::framework::driver::{DEFAULT_RAW_BUFFER, drive};
 use crate::framework::model::{
     ChecksumFmt, DomainEvent, Normalizer, ReconstructionModel,
 };
+use crate::framework::protocol::DeclaredSet;
 use crate::framework::protocol::{Heartbeat, ProtocolHooks};
 use crate::framework::registry::{ExchangeAdapter, ExchangeProfile, TaskExit};
 use crate::framework::symbol::SymbolCodec;
@@ -48,7 +49,11 @@ impl ProtocolHooks for KrakenHooks {
     /// `symbol: [...]` (a single frame can fan out over many symbols, but each
     /// channel is its own frame). `symbols` are venue wire symbols (`"BTC/USD"`,
     /// Slash codec).
-    fn subscribe_frames(&self, symbols: &[String]) -> Vec<Message> {
+    fn subscribe_frames(
+        &self,
+        symbols: &[String],
+        _declared: &DeclaredSet,
+    ) -> Vec<Message> {
         let book = serde_json::json!({
             // `depth: 10` pins Kraken's returned book to the top-10 window that
             // `ReconstructionModel::ChecksumDelta { KrakenTop10 }` validates via
@@ -200,6 +205,7 @@ impl ExchangeAdapter for KrakenAdapter {
     fn spawn(
         &self,
         symbols: Vec<String>,
+        declared: DeclaredSet,
         tx: mpsc::Sender<DomainEvent>,
         shutdown: watch::Receiver<bool>,
         metrics: SourceMetrics,
@@ -207,6 +213,7 @@ impl ExchangeAdapter for KrakenAdapter {
         tokio::spawn(drive::<KrakenHooks, KrakenDecoder, KrakenNormalizer>(
             Arc::new(KrakenHooks),
             symbols,
+            declared,
             KrakenNormalizer {
                 metrics: metrics.clone(),
             },
@@ -376,7 +383,8 @@ mod tests {
 
     #[test]
     fn subscribe_frames_carry_book_and_trade_channels() {
-        let frames = KrakenHooks.subscribe_frames(&["BTC/USD".to_string()]);
+        let frames =
+            KrakenHooks.subscribe_frames(&["BTC/USD".to_string()], &DeclaredSet::all());
         assert_eq!(frames.len(), 2);
         let bodies: Vec<serde_json::Value> = frames
             .iter()

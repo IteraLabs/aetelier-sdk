@@ -30,6 +30,7 @@ use super::model::{
 use super::rest::RestSnapshot;
 use super::symbol::SymbolCodec;
 use crate::synchronizers::capture_levels;
+use aetelier_types::config::markets::market_config::{DeclaredDatatype, DeclaredSet};
 
 /// A reconstructed event ready to feed a `MarketSynchronizer`.
 pub enum ReconstructedEvent {
@@ -112,6 +113,8 @@ pub struct SourceRuntime {
     codec: SymbolCodec,
     needs_rest: bool,
     seeds_out_of_band: bool,
+    declared: DeclaredSet,
+    undeclared_warned: std::collections::BTreeSet<DeclaredDatatype>,
     books: HashMap<TradingPair, PairBook>,
     /// Shared worker counter handle: gaps/resyncs/checksum failures bump here.
     metrics: SourceMetrics,
@@ -138,6 +141,7 @@ impl SourceRuntime {
         model: ReconstructionModel,
         recovery: RecoveryAction,
         metrics: SourceMetrics,
+        declared: DeclaredSet,
     ) -> Self {
         let needs_rest = model.needs_rest();
         let seeds_out_of_band = model.seeds_out_of_band();
@@ -178,6 +182,8 @@ impl SourceRuntime {
             codec,
             needs_rest,
             seeds_out_of_band,
+            declared,
+            undeclared_warned: std::collections::BTreeSet::new(),
             books,
             metrics,
             feeds: None,
@@ -410,6 +416,17 @@ impl SourceRuntime {
         let needs_rest = self.needs_rest;
         match ev {
             DomainEvent::Book(mut delta) => {
+                if !self.declared.contains(DeclaredDatatype::Orderbook) {
+                    self.metrics.bump_undeclared_dropped();
+                    if self.undeclared_warned.insert(DeclaredDatatype::Orderbook) {
+                        tracing::warn!(
+                            exchange = %self.exchange,
+                            datatype = "orderbook",
+                            "runtime.undeclared_event_dropped"
+                        );
+                    }
+                    return Ok(false);
+                }
                 let Some(pair) = self.codec.decode(&delta.symbol) else {
                     return Ok(false);
                 };
@@ -556,6 +573,17 @@ impl SourceRuntime {
                 Ok(true)
             }
             DomainEvent::Trade { trade, sequence } => {
+                if !self.declared.contains(DeclaredDatatype::Trades) {
+                    self.metrics.bump_undeclared_dropped();
+                    if self.undeclared_warned.insert(DeclaredDatatype::Trades) {
+                        tracing::warn!(
+                            exchange = %self.exchange,
+                            datatype = "trades",
+                            "runtime.undeclared_event_dropped"
+                        );
+                    }
+                    return Ok(false);
+                }
                 // The runtime's tracked set is authoritative for this socket.
                 let Some(b) = self.books.get_mut(&trade.pair) else {
                     return Ok(false); // untracked pair — drop
@@ -1059,6 +1087,7 @@ mod tests {
             binance_model(),
             RecoveryAction::RestSnapshot,
             SourceMetrics::default(),
+            DeclaredSet::all(),
         );
         runtime.run(ev_rx, Some(seeder), out_tx, sd_rx).await;
 
@@ -1189,6 +1218,7 @@ mod tests {
             binance_model(),
             RecoveryAction::RestSnapshot,
             SourceMetrics::default(),
+            DeclaredSet::all(),
         );
         assert_eq!(runtime.len(), 2);
         runtime.run(ev_rx, Some(seeder), out_tx, sd_rx).await;
@@ -1261,6 +1291,7 @@ mod tests {
             ReconstructionModel::FullRefresh,
             RecoveryAction::Resubscribe,
             SourceMetrics::default(),
+            DeclaredSet::all(),
         );
         let outcome = runtime.run(ev_rx, None, out_tx, sd_rx).await;
         assert!(
@@ -1322,6 +1353,7 @@ mod tests {
             ReconstructionModel::FullRefresh,
             RecoveryAction::Resubscribe,
             SourceMetrics::default(),
+            DeclaredSet::all(),
         );
         runtime.run(ev_rx, None, out_tx, sd_rx).await;
 
@@ -1365,6 +1397,7 @@ mod tests {
             model,
             RecoveryAction::Resubscribe,
             metrics.clone(),
+            DeclaredSet::all(),
         );
 
         ev_tx
@@ -1419,6 +1452,7 @@ mod tests {
             binance_model(),
             RecoveryAction::RestSnapshot,
             metrics.clone(),
+            DeclaredSet::all(),
         );
 
         // Non-snapshot delta on a never-seeded book: gap, no reseed possible.
@@ -1468,6 +1502,7 @@ mod tests {
             model,
             RecoveryAction::Resubscribe,
             metrics.clone(),
+            DeclaredSet::all(),
         );
 
         // Self-seed the book cleanly, then the tracker's verdict arrives.
@@ -1521,6 +1556,7 @@ mod tests {
             binance_model(),
             RecoveryAction::RestSnapshot,
             metrics.clone(),
+            DeclaredSet::all(),
         )
         .with_trade_seq_carry(carry.clone());
 
@@ -1615,6 +1651,7 @@ mod tests {
             binance_model(),
             RecoveryAction::RestSnapshot,
             SourceMetrics::default(),
+            DeclaredSet::all(),
         )
         .with_feeds(feeds.clone());
         runtime.run(ev_rx, Some(seeder), out_tx, sd_rx).await;
@@ -1661,6 +1698,7 @@ mod tests {
             ReconstructionModel::FullRefresh,
             RecoveryAction::Resubscribe,
             metrics.clone(),
+            DeclaredSet::all(),
         );
         let outcome = runtime.run(ev_rx, None, out_tx, sd_rx).await;
         assert!(matches!(outcome, RuntimeOutcome::Finished));
@@ -1703,6 +1741,7 @@ mod tests {
             binance_model(),
             RecoveryAction::RestSnapshot,
             metrics.clone(),
+            DeclaredSet::all(),
         );
         let handle = tokio::spawn(runtime.run(ev_rx, Some(seeder), out_tx, sd_rx));
 
@@ -1737,6 +1776,7 @@ mod tests {
             binance_model(),
             RecoveryAction::RestSnapshot,
             SourceMetrics::default(),
+            DeclaredSet::all(),
         );
         let handle = tokio::spawn(runtime.run(ev_rx, Some(seeder), out_tx, sd_rx));
         let outcome = tokio::time::timeout(std::time::Duration::from_secs(60), handle)
@@ -1808,6 +1848,7 @@ mod tests {
             binance_model(),
             RecoveryAction::RestSnapshot,
             SourceMetrics::default(),
+            DeclaredSet::all(),
         )
         .with_feeds(feeds.clone());
         runtime.run(ev_rx, Some(seeder), out_tx, sd_rx).await;
@@ -1832,6 +1873,7 @@ mod tests {
             htx_model(),
             RecoveryAction::Resubscribe,
             metrics,
+            DeclaredSet::all(),
         )
     }
 
@@ -2002,6 +2044,78 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn undeclared_trades_are_dropped_and_counted_books_pass() {
+        let (ev_tx, ev_rx) = mpsc::channel(16);
+        let (out_tx, mut out_rx) = mpsc::channel(16);
+        let (_sd_tx, sd_rx) = watch::channel(false);
+        let metrics = SourceMetrics::default();
+        let mut only_books = DeclaredSet::default();
+        let mut section =
+            aetelier_types::config::markets::market_config::DataTypesSection::default();
+        section.orderbook.enabled = true;
+        only_books = section.declared_set();
+        let model = ReconstructionModel::SeqDelta {
+            predicate: SeqPredicate::RangeInclusive,
+            source: SnapshotSource::WssSelfSeed,
+        };
+        let runtime = SourceRuntime::new(
+            "bybit",
+            SymbolCodec::Concat { upper: true },
+            vec!["BTCUSDT".to_string()],
+            model,
+            RecoveryAction::Resubscribe,
+            metrics.clone(),
+            only_books,
+        );
+
+        ev_tx
+            .send(DomainEvent::Book(nd(
+                "BTCUSDT",
+                vec![("100", "1")],
+                vec![("101", "1")],
+                100,
+                100,
+                true,
+            )))
+            .await
+            .unwrap();
+        ev_tx
+            .send(DomainEvent::Trade {
+                trade: Trade {
+                    source_trade_ts_us: 1,
+                    local_trade_ts_us: 0,
+                    source_trade_rtt_us: 0,
+                    pair: TradingPair::new("BTC", "USDT"),
+                    side: TradeSide::Buy,
+                    amount: aetelier_types::orderbooks::f64_to_decimal(1.0),
+                    price: aetelier_types::orderbooks::f64_to_decimal(100.0),
+                    exchange: "bybit".into(),
+                    id: "t1".into(),
+                    origin: Default::default(),
+                },
+                sequence: None,
+            })
+            .await
+            .unwrap();
+        drop(ev_tx);
+
+        let outcome = runtime.run(ev_rx, None, out_tx, sd_rx).await;
+        let mut books = 0;
+        let mut trades = 0;
+        while let Some(ev) = out_rx.recv().await {
+            match ev {
+                ReconstructedEvent::Book { .. } => books += 1,
+                ReconstructedEvent::Trade(_) => trades += 1,
+            }
+        }
+        assert!(matches!(outcome, RuntimeOutcome::Finished));
+        assert_eq!(books, 1, "declared orderbook passes");
+        assert_eq!(trades, 0, "undeclared trade must not emit");
+        let m = metrics.snapshot();
+        assert_eq!(m.undeclared_dropped, 1, "the drop is counted, not silent");
+    }
+
+    #[tokio::test]
     async fn wss_self_seed_venues_stay_passthrough_snapshot_first() {
         for (venue, predicate) in [
             ("bybit", SeqPredicate::RangeInclusive),
@@ -2023,6 +2137,7 @@ mod tests {
                 model,
                 RecoveryAction::Resubscribe,
                 metrics.clone(),
+                DeclaredSet::all(),
             );
 
             ev_tx

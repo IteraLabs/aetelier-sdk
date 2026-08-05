@@ -26,6 +26,7 @@ use crate::framework::driver::{DEFAULT_RAW_BUFFER, drive};
 use crate::framework::model::{
     DomainEvent, Normalizer, ReconstructionModel, SeqPredicate, SnapshotSource,
 };
+use crate::framework::protocol::DeclaredSet;
 use crate::framework::protocol::{Heartbeat, Prepared, ProtocolHooks};
 use crate::framework::registry::{ExchangeAdapter, ExchangeProfile, TaskExit};
 use crate::framework::symbol::SymbolCodec;
@@ -85,6 +86,7 @@ fn parse_bullet(body: &str, connect_id: &str) -> Result<Prepared, ExchangeError>
             }),
         }),
         extra_frames: Vec::new(),
+        extra_frames_delay: None,
     })
 }
 
@@ -116,7 +118,11 @@ impl ProtocolHooks for KucoinHooks {
 
     /// One `subscribe` frame for level2 (book) and one for match (trades),
     /// each spanning every symbol (comma-joined topic).
-    fn subscribe_frames(&self, symbols: &[String]) -> Vec<Message> {
+    fn subscribe_frames(
+        &self,
+        symbols: &[String],
+        _declared: &DeclaredSet,
+    ) -> Vec<Message> {
         let csv = symbols.join(",");
         let l2 = serde_json::json!({
             "id": "sub-l2", "type": "subscribe",
@@ -282,6 +288,7 @@ impl ExchangeAdapter for KucoinAdapter {
     fn spawn(
         &self,
         symbols: Vec<String>,
+        declared: DeclaredSet,
         tx: mpsc::Sender<DomainEvent>,
         shutdown: watch::Receiver<bool>,
         metrics: SourceMetrics,
@@ -292,6 +299,7 @@ impl ExchangeAdapter for KucoinAdapter {
         tokio::spawn(drive::<KucoinHooks, KucoinDecoder, KucoinNormalizer>(
             hooks,
             symbols,
+            declared,
             KucoinNormalizer {
                 metrics: metrics.clone(),
             },
