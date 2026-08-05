@@ -338,7 +338,7 @@ impl ExchangeAdapter for HtxAdapter {
 mod tests {
     use super::*;
     use crate::clients::wss::WssDecoder;
-    use crate::sources::htx::responses::orderbooks::HtxMbpUpdate;
+    use crate::sources::htx::responses::orderbooks::{HtxMbpSnapshot, HtxMbpUpdate};
 
     #[test]
     fn normalizes_mbp_update_with_prev_pointer() {
@@ -361,6 +361,30 @@ mod tests {
                 assert_eq!(nd.update_id, 101);
                 assert_eq!(nd.sequence, 100); // prevSeqNum → ExactPrev pointer
                 assert!(!nd.is_snapshot);
+            }
+            other => panic!("expected Book, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn normalizes_req_reply_as_in_band_snapshot() {
+        let s = HtxMbpSnapshot {
+            rep: "market.btcusdt.mbp.150".into(),
+            ts: 1_700_000_000_000,
+            data: HtxMbpTick {
+                seq_num: 100,
+                prev_seq_num: None,
+                bids: vec![HtxLevel(100.0, 1.5)],
+                asks: vec![HtxLevel(101.0, 2.0)],
+            },
+        };
+        let evs = HtxNormalizer::default().normalize(HtxWssEvent::MbpSnapshot(s));
+        assert_eq!(evs.len(), 1);
+        match &evs[0] {
+            DomainEvent::Book(nd) => {
+                assert_eq!(nd.update_id, 100);
+                assert_eq!(nd.sequence, 0);
+                assert!(nd.is_snapshot, "the req reply is the in-band seed");
             }
             other => panic!("expected Book, got {other:?}"),
         }

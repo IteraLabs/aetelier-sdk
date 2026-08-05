@@ -12,6 +12,8 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
 
+use tokio::time::Instant;
+
 use tokio::sync::{mpsc, watch};
 
 use crate::errors::ExchangeError;
@@ -70,6 +72,9 @@ const SEED_RETRY_BASE: Duration = Duration::from_millis(250);
 /// Cap on the seed-retry backoff.
 const SEED_RETRY_CAP: Duration = Duration::from_secs(2);
 
+const IN_BAND_SEED_DEADLINE: Duration = Duration::from_secs(10);
+const SEED_DEADLINE_TICK: Duration = Duration::from_secs(1);
+
 /// Routing mode for a pair's incoming book deltas. This is NOT the book's
 /// truth — sync state lives in `OrderBookState` on the book itself.
 enum Phase {
@@ -87,6 +92,8 @@ struct PairBook {
     book: SourcedOrderbook,
     trades: SourcedTradebook,
     phase: Phase,
+    buffering_since: Option<Instant>,
+    buffer_overflowed: bool,
     /// A seed fetch is in flight for this pair.
     seeding: bool,
     /// Consecutive re-seed attempts since the last clean reconcile.
@@ -104,6 +111,7 @@ pub struct SourceRuntime {
     exchange: String,
     codec: SymbolCodec,
     needs_rest: bool,
+    seeds_out_of_band: bool,
     books: HashMap<TradingPair, PairBook>,
     /// Shared worker counter handle: gaps/resyncs/checksum failures bump here.
     metrics: SourceMetrics,
@@ -132,6 +140,7 @@ impl SourceRuntime {
         metrics: SourceMetrics,
     ) -> Self {
         let needs_rest = model.needs_rest();
+        let seeds_out_of_band = model.seeds_out_of_band();
         let requested = wire_symbols.len();
         let mut books = HashMap::new();
         for wire in wire_symbols {
@@ -139,7 +148,7 @@ impl SourceRuntime {
                 tracing::warn!(symbol = %wire, "runtime.symbol_undecodable_skipped");
                 continue;
             };
-            let phase = if needs_rest {
+            let phase = if seeds_out_of_band {
                 Phase::Buffering(VecDeque::new())
             } else {
                 Phase::Passthrough
@@ -151,6 +160,8 @@ impl SourceRuntime {
                     book: SourcedOrderbook::new(pair.clone(), model.clone(), recovery),
                     trades: SourcedTradebook::new(pair),
                     phase,
+                    buffering_since: seeds_out_of_band.then(Instant::now),
+                    buffer_overflowed: false,
                     seeding: false,
                     reseeds: 0,
                     last_ts: 0,
@@ -166,6 +177,7 @@ impl SourceRuntime {
             exchange: exchange.into(),
             codec,
             needs_rest,
+            seeds_out_of_band,
             books,
             metrics,
             feeds: None,
@@ -271,6 +283,9 @@ impl SourceRuntime {
 
         let mut events_done = false;
         let mut resync = false;
+        let awaits_in_band_seed = self.seeds_out_of_band && !self.needs_rest;
+        let mut seed_deadline = tokio::time::interval(SEED_DEADLINE_TICK);
+        seed_deadline.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             if events_done && in_flight == 0 {
                 break;
@@ -355,6 +370,13 @@ impl SourceRuntime {
                         }
                     }
                 }
+
+                _ = seed_deadline.tick(), if awaits_in_band_seed => {
+                    if self.in_band_seed_expired() {
+                        resync = true;
+                        break;
+                    }
+                }
             }
         }
         if in_flight > 0 {
@@ -396,6 +418,16 @@ impl SourceRuntime {
                 // wire form — e.g. Gate.io's `BTC_USDT` parses to a non-canonical
                 // pair, while `BTCUSDT` (Bitget) doesn't parse at all.
                 delta.symbol = pair.to_canonical();
+                if delta.is_snapshot
+                    && self
+                        .books
+                        .get(&pair)
+                        .is_some_and(|b| matches!(b.phase, Phase::Buffering(_)))
+                {
+                    return self
+                        .apply_seed(&pair, delta, out, seeder, seed_tx, in_flight)
+                        .await;
+                }
                 let can_reseed = seeder.is_some();
                 let mut reseed = false;
                 let mut resync = false;
@@ -407,6 +439,14 @@ impl SourceRuntime {
                     match &mut b.phase {
                         Phase::Buffering(buf) => {
                             if buf.len() >= MAX_BUFFERED_DELTAS {
+                                if !b.buffer_overflowed {
+                                    b.buffer_overflowed = true;
+                                    tracing::warn!(
+                                        pair = %pair,
+                                        cap = MAX_BUFFERED_DELTAS,
+                                        "runtime.seed_buffer_overflow_dropping_oldest"
+                                    );
+                                }
                                 buf.pop_front(); // drop oldest; discarded at seed anyway
                             }
                             buf.push_back(delta);
@@ -442,6 +482,7 @@ impl SourceRuntime {
                                 let mut q = VecDeque::new();
                                 q.push_back(delta);
                                 b.phase = Phase::Buffering(q);
+                                b.buffering_since = Some(Instant::now());
                                 reseed = true;
                             }
                             Err(resync_e) if !needs_rest => {
@@ -510,6 +551,7 @@ impl SourceRuntime {
                 for b in self.books.values_mut() {
                     b.book.force_gap();
                     b.phase = Phase::Passthrough;
+                    b.buffering_since = None;
                 }
                 Ok(true)
             }
@@ -623,6 +665,8 @@ impl SourceRuntime {
                     Phase::Buffering(buf) => buf,
                     Phase::Passthrough => VecDeque::new(),
                 };
+                b.buffering_since = None;
+                b.buffer_overflowed = false;
                 let mut it = buffered.into_iter();
                 let mut gapped = false;
                 while let Some(delta) = it.next() {
@@ -664,6 +708,7 @@ impl SourceRuntime {
                                     q.pop_front();
                                 }
                                 b.phase = Phase::Buffering(q);
+                                b.buffering_since = Some(Instant::now());
                                 reseed = true;
                             } else {
                                 // Replay gapped past the reseed budget:
@@ -723,6 +768,27 @@ impl SourceRuntime {
         {
             fs.mark_resubscribing(pair, FeedDatatype::Orders);
         }
+    }
+
+    fn in_band_seed_expired(&mut self) -> bool {
+        let mut expired = false;
+        for (pair, b) in self.books.iter() {
+            if let Some(since) = b.buffering_since
+                && matches!(b.phase, Phase::Buffering(_))
+                && since.elapsed() > IN_BAND_SEED_DEADLINE
+            {
+                tracing::warn!(
+                    pair = %pair,
+                    waited_ms = since.elapsed().as_millis() as u64,
+                    "runtime.in_band_seed_deadline_resync"
+                );
+                expired = true;
+            }
+        }
+        if expired {
+            self.metrics.bump_resyncs();
+        }
+        expired
     }
 
     /// Start a fresh seed fetch for `pair` (unless one is already in flight).
@@ -1749,5 +1815,255 @@ mod tests {
 
         let snap = feeds.lock().unwrap().snapshot();
         assert_eq!(snap[0].state, FeedState::Resubscribing);
+    }
+
+    fn htx_model() -> ReconstructionModel {
+        ReconstructionModel::SeqDelta {
+            predicate: SeqPredicate::ExactPrev,
+            source: SnapshotSource::ReqOnSocket,
+        }
+    }
+
+    fn htx_runtime(metrics: SourceMetrics) -> SourceRuntime {
+        SourceRuntime::new(
+            "htx",
+            SymbolCodec::Concat { upper: true },
+            vec!["BTCUSDT".to_string()],
+            htx_model(),
+            RecoveryAction::Resubscribe,
+            metrics,
+        )
+    }
+
+    #[tokio::test]
+    async fn req_on_socket_seed_lands_mid_stream_and_reconciles() {
+        let (ev_tx, ev_rx) = mpsc::channel(16);
+        let (out_tx, mut out_rx) = mpsc::channel(16);
+        let (_sd_tx, sd_rx) = watch::channel(false);
+        let metrics = SourceMetrics::default();
+        let runtime = htx_runtime(metrics.clone());
+
+        ev_tx
+            .send(DomainEvent::Book(nd(
+                "BTCUSDT",
+                vec![("100", "1")],
+                vec![("101", "1")],
+                100,
+                99,
+                false,
+            )))
+            .await
+            .unwrap();
+        ev_tx
+            .send(DomainEvent::Book(nd(
+                "BTCUSDT",
+                vec![("100", "2")],
+                vec![("101", "2")],
+                106,
+                105,
+                false,
+            )))
+            .await
+            .unwrap();
+        ev_tx
+            .send(DomainEvent::Book(nd(
+                "BTCUSDT",
+                vec![("99", "5")],
+                vec![("102", "5")],
+                105,
+                0,
+                true,
+            )))
+            .await
+            .unwrap();
+        ev_tx
+            .send(DomainEvent::Book(nd(
+                "BTCUSDT",
+                vec![("99", "6")],
+                vec![("102", "6")],
+                107,
+                106,
+                false,
+            )))
+            .await
+            .unwrap();
+        drop(ev_tx);
+
+        let outcome = runtime.run(ev_rx, None, out_tx, sd_rx).await;
+        let mut books = 0;
+        while let Some(ev) = out_rx.recv().await {
+            if matches!(ev, ReconstructedEvent::Book { .. }) {
+                books += 1;
+            }
+        }
+
+        assert!(
+            matches!(outcome, RuntimeOutcome::Finished),
+            "deltas racing the in-band seed must not force a reconnect"
+        );
+        assert_eq!(books, 3, "seed emit + straddling replay + live delta");
+        let m = metrics.snapshot();
+        assert_eq!(m.gaps, 0, "the race is not a gap");
+        assert_eq!(m.resyncs, 0, "the race is not a resync");
+    }
+
+    #[tokio::test]
+    async fn req_on_socket_replay_gap_reconnects() {
+        let (ev_tx, ev_rx) = mpsc::channel(16);
+        let (out_tx, mut out_rx) = mpsc::channel(16);
+        let (_sd_tx, sd_rx) = watch::channel(false);
+        let metrics = SourceMetrics::default();
+        let runtime = htx_runtime(metrics.clone());
+
+        ev_tx
+            .send(DomainEvent::Book(nd(
+                "BTCUSDT",
+                vec![("100", "2")],
+                vec![("101", "2")],
+                106,
+                105,
+                false,
+            )))
+            .await
+            .unwrap();
+        ev_tx
+            .send(DomainEvent::Book(nd(
+                "BTCUSDT",
+                vec![("100", "3")],
+                vec![("101", "3")],
+                120,
+                119,
+                false,
+            )))
+            .await
+            .unwrap();
+        ev_tx
+            .send(DomainEvent::Book(nd(
+                "BTCUSDT",
+                vec![("99", "5")],
+                vec![("102", "5")],
+                105,
+                0,
+                true,
+            )))
+            .await
+            .unwrap();
+        drop(ev_tx);
+
+        let outcome = runtime.run(ev_rx, None, out_tx, sd_rx).await;
+        while out_rx.recv().await.is_some() {}
+
+        assert!(
+            matches!(outcome, RuntimeOutcome::ResyncRequired),
+            "a broken chain in the buffered tail must reconnect (reconnect re-sends the req)"
+        );
+        let m = metrics.snapshot();
+        assert!(m.gaps >= 1);
+        assert!(m.resyncs >= 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn req_on_socket_seed_deadline_escalates_to_resync() {
+        let (ev_tx, ev_rx) = mpsc::channel(16);
+        let (out_tx, mut out_rx) = mpsc::channel(16);
+        let (_sd_tx, sd_rx) = watch::channel(false);
+        let metrics = SourceMetrics::default();
+        let runtime = htx_runtime(metrics.clone());
+
+        ev_tx
+            .send(DomainEvent::Book(nd(
+                "BTCUSDT",
+                vec![("100", "1")],
+                vec![("101", "1")],
+                100,
+                99,
+                false,
+            )))
+            .await
+            .unwrap();
+
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(60),
+            runtime.run(ev_rx, None, out_tx, sd_rx),
+        )
+        .await
+        .expect("deadline must end the runtime while the event stream stays open");
+        assert!(
+            matches!(outcome, RuntimeOutcome::ResyncRequired),
+            "a seed that never arrives must reconnect, not stall buffering forever"
+        );
+        assert!(
+            out_rx.try_recv().is_err(),
+            "nothing emitted from an unseeded book"
+        );
+        let m = metrics.snapshot();
+        assert!(m.resyncs >= 1);
+        drop(ev_tx);
+    }
+
+    #[tokio::test]
+    async fn wss_self_seed_venues_stay_passthrough_snapshot_first() {
+        for (venue, predicate) in [
+            ("bybit", SeqPredicate::RangeInclusive),
+            ("bitget", SeqPredicate::ExactPrev),
+            ("poloniex", SeqPredicate::ExactPrev),
+        ] {
+            let model = ReconstructionModel::SeqDelta {
+                predicate,
+                source: SnapshotSource::WssSelfSeed,
+            };
+            let (ev_tx, ev_rx) = mpsc::channel(16);
+            let (out_tx, mut out_rx) = mpsc::channel(16);
+            let (_sd_tx, sd_rx) = watch::channel(false);
+            let metrics = SourceMetrics::default();
+            let runtime = SourceRuntime::new(
+                venue,
+                SymbolCodec::Concat { upper: true },
+                vec!["BTCUSDT".to_string()],
+                model,
+                RecoveryAction::Resubscribe,
+                metrics.clone(),
+            );
+
+            ev_tx
+                .send(DomainEvent::Book(nd(
+                    "BTCUSDT",
+                    vec![("100", "1")],
+                    vec![("101", "1")],
+                    100,
+                    100,
+                    true,
+                )))
+                .await
+                .unwrap();
+            ev_tx
+                .send(DomainEvent::Book(nd(
+                    "BTCUSDT",
+                    vec![("100", "2")],
+                    vec![("101", "2")],
+                    101,
+                    100,
+                    false,
+                )))
+                .await
+                .unwrap();
+            drop(ev_tx);
+
+            let outcome = runtime.run(ev_rx, None, out_tx, sd_rx).await;
+            let mut books = 0;
+            while let Some(ev) = out_rx.recv().await {
+                if matches!(ev, ReconstructedEvent::Book { .. }) {
+                    books += 1;
+                }
+            }
+            assert!(
+                matches!(outcome, RuntimeOutcome::Finished),
+                "{venue}: snapshot-first self-seed must stream unchanged"
+            );
+            assert_eq!(books, 2, "{venue}: snapshot + delta both emit");
+            let m = metrics.snapshot();
+            assert_eq!(m.gaps, 0, "{venue}");
+            assert_eq!(m.resyncs, 0, "{venue}");
+        }
     }
 }

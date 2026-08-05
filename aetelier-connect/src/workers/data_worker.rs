@@ -701,6 +701,7 @@ impl DataWorker {
                 break;
             }
             reconnects += 1;
+            metrics.bump_reconnects();
             connection_state = crate::ConnectionState::Reconnecting {
                 attempt: reconnects,
             };

@@ -172,6 +172,13 @@ impl ReconstructionModel {
         self.snapshot_source() == Some(SnapshotSource::RestSnapshot)
     }
 
+    pub fn seeds_out_of_band(&self) -> bool {
+        matches!(
+            self.snapshot_source(),
+            Some(SnapshotSource::RestSnapshot) | Some(SnapshotSource::ReqOnSocket)
+        )
+    }
+
     /// The recovery action continuity breaks resolve through. `ReqOnSocket`
     /// venues (HTX) map to `Resubscribe`: the declared in-band REQ re-seed
     /// has no runtime implementation, and a fresh subscribe re-seeds the
@@ -755,6 +762,45 @@ mod tests {
             .snapshot_source(),
             None
         );
+    }
+
+    #[test]
+    fn out_of_band_seeding_splits_seeder_from_buffering() {
+        for source in [SnapshotSource::RestSnapshot, SnapshotSource::ReqOnSocket] {
+            let model = ReconstructionModel::SeqDelta {
+                predicate: SeqPredicate::ExactPrev,
+                source,
+            };
+            assert!(model.seeds_out_of_band(), "{source:?} races its deltas");
+        }
+        let self_seed = ReconstructionModel::SeqDelta {
+            predicate: SeqPredicate::RangeInclusive,
+            source: SnapshotSource::WssSelfSeed,
+        };
+        assert!(!self_seed.seeds_out_of_band());
+        assert!(!ReconstructionModel::FullRefresh.seeds_out_of_band());
+        assert!(
+            !ReconstructionModel::ChecksumDelta {
+                fmt: ChecksumFmt::OkxTop25
+            }
+            .seeds_out_of_band()
+        );
+        assert!(
+            ReconstructionModel::L3 {
+                source: SnapshotSource::RestSnapshot
+            }
+            .seeds_out_of_band()
+        );
+        let rest = ReconstructionModel::SeqDelta {
+            predicate: SeqPredicate::RangeInclusive,
+            source: SnapshotSource::RestSnapshot,
+        };
+        assert!(rest.needs_rest() && rest.seeds_out_of_band());
+        let in_band = ReconstructionModel::SeqDelta {
+            predicate: SeqPredicate::ExactPrev,
+            source: SnapshotSource::ReqOnSocket,
+        };
+        assert!(!in_band.needs_rest() && in_band.seeds_out_of_band());
     }
 
     #[test]

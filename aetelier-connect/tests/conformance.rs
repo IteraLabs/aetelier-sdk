@@ -237,6 +237,10 @@ macro_rules! conformance_suite {
                 harness::assert_kind(&$desc, kind("book_delta_application"));
             }
             #[test]
+            fn book_runtime_replay() {
+                harness::assert_kind(&$desc, kind("book_runtime_replay"));
+            }
+            #[test]
             fn book_invariants() {
                 harness::assert_kind(&$desc, kind("book_invariants"));
             }
