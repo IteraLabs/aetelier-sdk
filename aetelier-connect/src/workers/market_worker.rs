@@ -719,7 +719,7 @@ impl MarketWorker {
         let exchange_enum: Exchange = exchange_name.parse().unwrap_or(Exchange::Binance);
         let initial_datatypes = core.datatypes().enabled_names();
         // One Feed per (instrument, datatype) this worker subscribes; owned
-        // here so FeedIds survive socket reconnects. Extended datatypes flow
+        // here so FeedIds survive socket reconnects. Liquidations remain on
         // the legacy path and enter the feed taxonomy when ported.
         let feeds = {
             use crate::framework::feed::{Feed, FeedDatatype, FeedSet};
@@ -728,6 +728,8 @@ impl MarketWorker {
                 .filter_map(|name| match name.as_str() {
                     "orderbook" => Some(FeedDatatype::Orders),
                     "trades" => Some(FeedDatatype::Trades),
+                    "funding_rates" => Some(FeedDatatype::FundingRates),
+                    "open_interest" => Some(FeedDatatype::OpenInterest),
                     _ => None,
                 })
                 .map(|dt| Feed::new(exchange_enum, pair.clone(), dt))

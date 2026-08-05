@@ -47,21 +47,14 @@ impl SnapshotFlusher for ParquetSnapshotFlusher {
             return Ok(FlushReport::default());
         }
 
-        let mut orderbooks = Vec::new();
-        let mut trades = Vec::new();
-        let mut liquidations = Vec::new();
-        let mut funding_rates = Vec::new();
-        let mut open_interests = Vec::new();
-
-        for snap in snapshots {
-            if let Some(ob) = &snap.orderbook {
-                orderbooks.push(ob.clone());
-            }
-            trades.extend(snap.trades.iter().cloned());
-            liquidations.extend(snap.liquidations.iter().cloned());
-            funding_rates.extend(snap.funding_rate.iter().cloned());
-            open_interests.extend(snap.open_interest.iter().cloned());
-        }
+        let crate::snapshots::DecomposedSnapshots {
+            orderbooks,
+            trades,
+            liquidations,
+            funding_rates,
+            open_interests,
+            funding_settlements,
+        } = crate::snapshots::decompose_snapshots(snapshots);
 
         let output_path = std::path::Path::new(output_dir);
         let mut total_bytes: u64 = 0;
@@ -115,6 +108,17 @@ impl SnapshotFlusher for ParquetSnapshotFlusher {
             std::fs::create_dir_all(&dir)?;
             let path = crate::open_interest::write_oi_parquet_timestamped(
                 &open_interests,
+                &dir,
+                "sync",
+            )?;
+            total_bytes += file_bytes(&path)?;
+            total_files += 1;
+        }
+        if !funding_settlements.is_empty() {
+            let dir = output_path.join("funding_settlements");
+            std::fs::create_dir_all(&dir)?;
+            let path = crate::funding::write_funding_settlement_parquet_timestamped(
+                &funding_settlements,
                 &dir,
                 "sync",
             )?;

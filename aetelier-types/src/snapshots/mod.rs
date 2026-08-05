@@ -24,6 +24,7 @@ pub struct FlushResult {
     pub funding_path: Option<std::path::PathBuf>,
     /// Path to the written open interest file, if persisted.
     pub open_interest_path: Option<std::path::PathBuf>,
+    pub funding_settlement_path: Option<std::path::PathBuf>,
     /// Count of snapshots flushed in this operation.
     pub snapshot_count: usize,
 }

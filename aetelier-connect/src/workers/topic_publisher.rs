@@ -395,18 +395,19 @@ pub struct DomainTopicMessage {
 
 /// Broadcast topics carrying [`DomainTopicMessage`]s for the framework path.
 ///
-/// Only `orderbook.{depth}.{symbol}` and `trade.all.{symbol}` exist, because
-/// `DomainEvent` models only `Book | Trade`. `broadcast::Sender` is `Clone`, so
-/// this registry is `Clone` and the publishing sink and downstream subscribers
-/// can share the same channels.
+/// `orderbook.{depth}.{symbol}`, `trade.all.{symbol}`, `funding.all.{symbol}`
+/// and `open_interest.all.{symbol}` exist per the enabled datatypes.
+/// `broadcast::Sender` is `Clone`, so this registry is `Clone` and the
+/// publishing sink and downstream subscribers can share the same channels.
 #[derive(Clone)]
 pub struct DomainTopicRegistry {
     publishers: HashMap<String, broadcast::Sender<DomainTopicMessage>>,
 }
 
 impl DomainTopicRegistry {
-    /// Build the domain topics for the enabled book/trade datatypes. Derivatives
-    /// datatypes are intentionally absent (not representable in `DomainEvent`).
+    /// Build the domain topics for the enabled framework datatypes.
+    /// Liquidations are intentionally absent (not representable in
+    /// `DomainEvent` yet).
     pub fn from_config(
         symbol: &str,
         datatypes: &DataTypesSection,
@@ -419,6 +420,14 @@ impl DomainTopicRegistry {
         }
         if datatypes.trades.enabled {
             let topic = format!("trade.all.{}", symbol);
+            publishers.insert(topic, broadcast::channel(capacity).0);
+        }
+        if datatypes.funding_rates.enabled {
+            let topic = format!("funding.all.{}", symbol);
+            publishers.insert(topic, broadcast::channel(capacity).0);
+        }
+        if datatypes.open_interest.enabled {
+            let topic = format!("open_interest.all.{}", symbol);
             publishers.insert(topic, broadcast::channel(capacity).0);
         }
         Self { publishers }

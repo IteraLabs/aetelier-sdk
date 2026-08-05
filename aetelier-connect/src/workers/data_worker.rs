@@ -545,6 +545,14 @@ impl DataWorker {
             .trades
             .enabled
             .then(|| format!("trade.all.{}", symbol));
+        let funding_topic = datatypes
+            .funding_rates
+            .enabled
+            .then(|| format!("funding.all.{}", symbol));
+        let oi_topic = datatypes
+            .open_interest
+            .enabled
+            .then(|| format!("open_interest.all.{}", symbol));
 
         let exchange_enum: Exchange = exchange_name.parse().unwrap_or(Exchange::Bybit);
         let initial_datatypes = datatypes.enabled_names();
@@ -662,9 +670,11 @@ impl DataWorker {
                                     trade_topic.as_deref()
                                 }
                                 crate::framework::model::DomainEvent::FundingRate(_)
-                                | crate::framework::model::DomainEvent::OpenInterest(_)
                                 | crate::framework::model::DomainEvent::FundingSettlement(_) => {
-                                    None
+                                    funding_topic.as_deref()
+                                }
+                                crate::framework::model::DomainEvent::OpenInterest(_) => {
+                                    oi_topic.as_deref()
                                 }
                                 crate::framework::model::DomainEvent::ConnectionGap { .. } => None,
                             };

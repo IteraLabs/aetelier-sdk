@@ -41,21 +41,14 @@ impl FlushToParquet for MarketSynchronizer {
         }
         let snapshots = &self.buffer;
 
-        let mut orderbooks = Vec::new();
-        let mut trades = Vec::new();
-        let mut liquidations = Vec::new();
-        let mut funding_rates = Vec::new();
-        let mut open_interests = Vec::new();
-
-        for snap in snapshots {
-            if let Some(ob) = &snap.orderbook {
-                orderbooks.push(ob.clone());
-            }
-            trades.extend(snap.trades.iter().cloned());
-            liquidations.extend(snap.liquidations.iter().cloned());
-            funding_rates.extend(snap.funding_rate.iter().cloned());
-            open_interests.extend(snap.open_interest.iter().cloned());
-        }
+        let crate::snapshots::DecomposedSnapshots {
+            orderbooks,
+            trades,
+            liquidations,
+            funding_rates,
+            open_interests,
+            funding_settlements,
+        } = crate::snapshots::decompose_snapshots(snapshots);
 
         let mut result = FlushResult {
             snapshot_count: snapshots.len(),
@@ -117,6 +110,17 @@ impl FlushToParquet for MarketSynchronizer {
                 "sync",
             )?;
             result.open_interest_path = Some(path);
+        }
+
+        if !funding_settlements.is_empty() {
+            let fs_dir = output_dir.join("funding_settlements");
+            std::fs::create_dir_all(&fs_dir)?;
+            let path = crate::funding::write_funding_settlement_parquet_timestamped(
+                &funding_settlements,
+                &fs_dir,
+                "sync",
+            )?;
+            result.funding_settlement_path = Some(path);
         }
 
         // Every source wrote — safe to release the buffer now.
