@@ -279,12 +279,16 @@ pub enum SyncMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 pub enum TimeUnit {
     /// Nanoseconds.
+    #[serde(alias = "nanos", alias = "ns", alias = "nanoseconds")]
     Nanos,
     /// Microseconds.
+    #[serde(alias = "micros", alias = "us", alias = "microseconds")]
     Micros,
     /// Milliseconds.
+    #[serde(alias = "millis", alias = "ms", alias = "milliseconds")]
     Millis,
     /// Seconds.
+    #[serde(alias = "secs", alias = "s", alias = "seconds", alias = "Seconds")]
     Secs,
 }
 
@@ -484,5 +488,38 @@ impl std::fmt::Display for TimeUnit {
             Self::Millis => write!(f, "ms"),
             Self::Secs => write!(f, "s"),
         }
+    }
+}
+
+#[cfg(test)]
+mod time_unit_tests {
+    use super::TimeUnit;
+
+    #[derive(serde::Deserialize)]
+    struct Freq {
+        unit: TimeUnit,
+    }
+
+    #[test]
+    fn time_unit_accepts_common_aliases() {
+        for (raw, want) in [
+            ("Secs", TimeUnit::Secs),
+            ("secs", TimeUnit::Secs),
+            ("s", TimeUnit::Secs),
+            ("seconds", TimeUnit::Secs),
+            ("Seconds", TimeUnit::Secs),
+            ("Millis", TimeUnit::Millis),
+            ("millis", TimeUnit::Millis),
+            ("ms", TimeUnit::Millis),
+            ("milliseconds", TimeUnit::Millis),
+            ("Micros", TimeUnit::Micros),
+            ("us", TimeUnit::Micros),
+            ("Nanos", TimeUnit::Nanos),
+            ("ns", TimeUnit::Nanos),
+        ] {
+            let f: Freq = toml::from_str(&format!("unit = \"{raw}\"")).unwrap();
+            assert_eq!(f.unit, want, "{raw}");
+        }
+        assert!(toml::from_str::<Freq>("unit = \"fortnights\"").is_err());
     }
 }
