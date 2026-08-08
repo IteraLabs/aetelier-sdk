@@ -11,19 +11,20 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
+env:
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
+  CARGO_INCREMENTAL: "0"
+  CARGO_TERM_COLOR: always
+
 jobs:
+
   gates:
-    name: fmt + clippy + tests (${{ matrix.os }})
-    runs-on: [self-hosted, Linux]
-    # The parquet/arrow test binaries link with full debuginfo, which balloons
-    # target/ and the linker's memory; on the ubuntu runner that surfaced as
-    # `ld: signal 7 (Bus error), core dumped` while the tests themselves passed.
-    # CI never reads the debuginfo, so drop it (and incremental) to keep the
-    # link within the runner's disk/memory budget.
-    env:
-      CARGO_PROFILE_DEV_DEBUG: "0"
-      CARGO_PROFILE_TEST_DEBUG: "0"
-      CARGO_INCREMENTAL: "0"
+    name: fmt + clippy + tests (x86_64-unknown-linux-gnu)
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
 
@@ -34,14 +35,6 @@ jobs:
         with:
           tool: cargo-nextest
       - uses: Swatinem/rust-cache@v2
-        with:
-        # cache-bin: false — rust-cache otherwise caches AND RESTORES
-        # $CARGO_HOME/bin. On a self-hosted runner that IS the host's real
-        # ~/.cargo, so a restore overwrites it with a copy that has no
-        # rustup binary, leaving every shim dangling and deleting the
-        # host's cargo-installed tools (observed 2026-07-30 on two runners).
-        # Only the bin dir is skipped; the registry/target cache still works.
-          cache-bin: false
 
       - name: cargo fmt (blocking)
         run: cargo fmt --all -- --check
@@ -49,11 +42,6 @@ jobs:
       - name: cargo clippy (blocking)
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
 
-      # Parquet-gated code (the `validate`/`md_worker` bins, the io flush path,
-      # and any `#[cfg(feature = "parquet")]` test in any crate) is invisible to
-      # the default-feature legs above. Compile AND run it workspace-wide so a
-      # parquet-only breakage (e.g. a test built with the pre-Decimal Trade
-      # shape) cannot hide behind a green default run.
       - name: cargo clippy (parquet-gated, workspace, blocking)
         run: cargo clippy --locked --workspace --all-targets --features aetelier-sdk/parquet -- -D warnings
 
@@ -71,9 +59,50 @@ jobs:
           RUSTDOCFLAGS: -D warnings
         run: cargo doc --locked --workspace --no-deps
 
+  portability:
+    name: build + test (${{ matrix.triple }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04-arm
+            triple: aarch64-unknown-linux-gnu
+          - runner: macos-15
+            triple: aarch64-apple-darwin
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.triple }}
+
+      - name: assert host triple
+        shell: bash
+        run: |
+          host="$(rustc -vV | sed -n 's/^host: //p')"
+          echo "host=$host"
+          if [ "$host" != "${{ matrix.triple }}" ]; then
+            echo "::error::expected ${{ matrix.triple }}, runner reports $host"
+            exit 1
+          fi
+
+      - name: cargo build (workspace)
+        run: cargo build --locked --workspace --all-targets
+
+      - name: cargo nextest (unit + integration)
+        run: cargo nextest run --locked --workspace
+
+      - name: cargo nextest (parquet-gated suites, workspace)
+        run: cargo nextest run --locked --workspace --features aetelier-sdk/parquet
+
   features:
     name: per-crate feature matrix
-    runs-on: [self-hosted, Linux]
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -81,45 +110,23 @@ jobs:
         with:
           tool: cargo-hack
       - uses: Swatinem/rust-cache@v2
-        with:
-        # cache-bin: false — rust-cache otherwise caches AND RESTORES
-        # $CARGO_HOME/bin. On a self-hosted runner that IS the host's real
-        # ~/.cargo, so a restore overwrites it with a copy that has no
-        # rustup binary, leaving every shim dangling and deleting the
-        # host's cargo-installed tools (observed 2026-07-30 on two runners).
-        # Only the bin dir is skipped; the registry/target cache still works.
-          cache-bin: false
 
-      # Workspace builds unify features across members, masking per-crate
-      # breakage that only appears when a crate is depended on in isolation.
-      # Excluded feature: `torch` needs the libtorch C library, absent on
-      # runners (experimental, see aetelier-io docs).
-      # No --no-dev-deps: it rewrites Cargo.toml mid-run, which --locked
-      # rejects; resolver 2 already keeps dev-dep features out of `check`.
       - name: cargo hack check (each feature per crate)
         run: cargo hack check --locked --workspace --each-feature --exclude-features torch
 
   msrv:
     name: MSRV (1.88.0)
-    runs-on: [self-hosted, Linux]
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.88.0
       - uses: Swatinem/rust-cache@v2
-        with:
-        # cache-bin: false — rust-cache otherwise caches AND RESTORES
-        # $CARGO_HOME/bin. On a self-hosted runner that IS the host's real
-        # ~/.cargo, so a restore overwrites it with a copy that has no
-        # rustup binary, leaving every shim dangling and deleting the
-        # host's cargo-installed tools (observed 2026-07-30 on two runners).
-        # Only the bin dir is skipped; the registry/target cache still works.
-          cache-bin: false
       - name: cargo check on the declared rust-version
         run: cargo check --locked --workspace
 
   deny:
     name: cargo deny (advisories + licenses + bans + sources)
-    runs-on: [self-hosted, Linux]
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -127,13 +134,23 @@ jobs:
         with:
           tool: cargo-deny
       - uses: Swatinem/rust-cache@v2
-        with:
-        # cache-bin: false — rust-cache otherwise caches AND RESTORES
-        # $CARGO_HOME/bin. On a self-hosted runner that IS the host's real
-        # ~/.cargo, so a restore overwrites it with a copy that has no
-        # rustup binary, leaving every shim dangling and deleting the
-        # host's cargo-installed tools (observed 2026-07-30 on two runners).
-        # Only the bin dir is skipped; the registry/target cache still works.
-          cache-bin: false
       - name: cargo deny check
         run: cargo deny check advisories bans licenses sources
+
+  ci-green:
+    name: ci-green
+    if: always()
+    needs: [gates, portability, features, msrv, deny]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: assert every upstream job succeeded
+        run: |
+          echo 'gates=${{ needs.gates.result }}'
+          echo 'portability=${{ needs.portability.result }}'
+          echo 'features=${{ needs.features.result }}'
+          echo 'msrv=${{ needs.msrv.result }}'
+          echo 'deny=${{ needs.deny.result }}'
+          if ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') || contains(needs.*.result, 'skipped') }}; then
+            echo "::error::at least one ci job did not succeed"
+            exit 1
+          fi
