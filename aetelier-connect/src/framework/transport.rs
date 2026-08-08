@@ -31,11 +31,7 @@ const RTT_PING_SECS: u64 = 10;
 /// handshake surfaces as `ConnectionFailed` instead of parking the task.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 
-/// Receive-staleness deadline: if NO frame of any kind (data, ping, pong)
-/// arrives within this window the socket is presumed half-open and the
-/// transport exits `Stale` so the worker reconnects. Order books tick far
-/// inside this bound on every venue, so a healthy socket never trips it.
-const STALE_AFTER: Duration = Duration::from_secs(60);
+const CLOSE_GRACE: Duration = Duration::from_millis(500);
 
 /// Wall-clock now in UTC epoch microseconds (`0` on a clock error) — the
 /// platform timestamp standard. The RTT ping payload
@@ -64,6 +60,29 @@ fn ack_rejection_exit(streamed: bool, reason: String) -> WssExitReason {
 
 pub(crate) fn decode_ping_send_us(payload: &[u8]) -> Option<u64> {
     <[u8; 8]>::try_from(payload).ok().map(u64::from_le_bytes)
+}
+
+async fn elapsed_at(deadline: Option<tokio::time::Instant>) {
+    match deadline {
+        Some(at) => tokio::time::sleep_until(at).await,
+        None => std::future::pending::<()>().await,
+    }
+}
+
+async fn shutdown_signaled(rx: &mut Option<watch::Receiver<bool>>) {
+    match rx {
+        Some(r) => {
+            if *r.borrow() {
+                return;
+            }
+            while r.changed().await.is_ok() {
+                if *r.borrow() {
+                    return;
+                }
+            }
+        }
+        None => std::future::pending::<()>().await,
+    }
 }
 
 /// Fold a fresh RTT `sample_us` into the running EWMA. The first sample
@@ -108,9 +127,18 @@ impl<H: ProtocolHooks, D: WssDecoder> WssTransport<H, D> {
         tx: mpsc::Sender<(D::Event, u64)>,
         rtt_us: Arc<AtomicU64>,
         metrics: SourceMetrics,
+        shutdown: Option<watch::Receiver<bool>>,
     ) -> WssExitReason {
-        self.run_with_deadlines(tx, rtt_us, metrics, CONNECT_TIMEOUT, STALE_AFTER)
-            .await
+        let stale_after = self.hooks.stale_after();
+        self.run_with_deadlines(
+            tx,
+            rtt_us,
+            metrics,
+            CONNECT_TIMEOUT,
+            stale_after,
+            shutdown,
+        )
+        .await
     }
 
     /// [`run`](Self::run) with explicit connect/staleness deadlines — the
@@ -122,6 +150,7 @@ impl<H: ProtocolHooks, D: WssDecoder> WssTransport<H, D> {
         metrics: SourceMetrics,
         connect_timeout: Duration,
         stale_after: Duration,
+        mut shutdown: Option<watch::Receiver<bool>>,
     ) -> WssExitReason {
         // 1. Bootstrap (token / dynamic URL / login). Default no-op.
         let prepared = match self.hooks.prepare().await {
@@ -159,6 +188,7 @@ impl<H: ProtocolHooks, D: WssDecoder> WssTransport<H, D> {
 
         // 3. Subscribe (+ any extra bootstrap frames, e.g. HTX REQ seed).
         let mut frames = self.hooks.subscribe_frames(&self.symbols, &self.declared);
+        let expected_acks = frames.len();
         let held_extras = match prepared.extra_frames_delay {
             Some(delay) if !prepared.extra_frames.is_empty() => {
                 Some((prepared.extra_frames, delay))
@@ -173,6 +203,11 @@ impl<H: ProtocolHooks, D: WssDecoder> WssTransport<H, D> {
                 return WssExitReason::Transport(e);
             }
         }
+        let ack_deadline = self
+            .hooks
+            .subscribe_ack_deadline()
+            .map(|d| tokio::time::Instant::now() + d);
+        let mut acked = 0usize;
         let extras_handle = held_extras.map(|(extras, delay)| {
             let w = writer.clone();
             tokio::spawn(async move {
@@ -275,6 +310,46 @@ impl<H: ProtocolHooks, D: WssDecoder> WssTransport<H, D> {
                     exit = WssExitReason::Stale { silence: stale_after };
                     break;
                 }
+                _ = shutdown_signaled(&mut shutdown) => {
+                    let farewell =
+                        self.hooks.unsubscribe_frames(&self.symbols, &self.declared);
+                    if !farewell.is_empty() {
+                        let mut w = writer.lock().await;
+                        for frame in farewell {
+                            if w.send(frame).await.is_err() {
+                                break;
+                            }
+                        }
+                        let _ = w.send(Message::Close(None)).await;
+                        drop(w);
+                        let _ = tokio::time::timeout(CLOSE_GRACE, async {
+                            while let Some(Ok(m)) = reader.next().await {
+                                if matches!(m, Message::Close(_)) {
+                                    break;
+                                }
+                            }
+                        })
+                        .await;
+                        info!("framework.wss.unsubscribed_and_closed");
+                    }
+                    exit = WssExitReason::StreamEnded;
+                    break;
+                }
+                _ = elapsed_at(ack_deadline), if acked < expected_acks => {
+                    warn!(
+                        acked,
+                        expected = expected_acks,
+                        "framework.wss.subscribe_ack_deadline"
+                    );
+                    metrics.bump_ack_timeouts();
+                    exit = ack_rejection_exit(
+                        streamed,
+                        format!(
+                            "only {acked} of {expected_acks} subscriptions acked before deadline"
+                        ),
+                    );
+                    break;
+                }
                 _ = hb_dead_rx.changed() => {
                     if *hb_dead_rx.borrow() {
                         warn!("framework.wss.heartbeat_task_died");
@@ -350,7 +425,8 @@ impl<H: ProtocolHooks, D: WssDecoder> WssTransport<H, D> {
                     break;
                 }
                 AckOutcome::Accepted => {
-                    info!("framework.wss.subscribed");
+                    acked += 1;
+                    info!(acked, expected = expected_acks, "framework.wss.subscribed");
                     continue;
                 }
                 AckOutcome::NotAck => {}
@@ -372,6 +448,9 @@ impl<H: ProtocolHooks, D: WssDecoder> WssTransport<H, D> {
                 Ok(Some(event)) => {
                     metrics.bump_msgs();
                     streamed = true;
+                    if tx.capacity() == 0 {
+                        metrics.bump_ingest_backpressure();
+                    }
                     if tx.send((event, receipt_us)).await.is_err() {
                         exit = WssExitReason::ReceiverDropped;
                         break;
@@ -524,6 +603,7 @@ mod tests {
                     SourceMetrics::default(),
                     Duration::from_secs(5),
                     Duration::from_secs(5),
+                    None,
                 )
                 .await
         });
@@ -546,6 +626,61 @@ mod tests {
         assert!(
             gap >= Duration::from_millis(250),
             "extras must trail by ~the configured delay, gap was {gap:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn full_ingest_buffer_counts_backpressure() {
+        use futures_util::SinkExt as _;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            for i in 0..8 {
+                let _ = ws.send(Message::Text(format!("data{i}").into())).await;
+            }
+            sleep(Duration::from_secs(30)).await;
+        });
+
+        let transport = WssTransport::<SilentHooks, NoopDecoder>::new(
+            Arc::new(SilentHooks(format!("ws://{addr}"))),
+            vec!["TEST".to_string()],
+            Prepared_DS::all(),
+        );
+        let metrics = SourceMetrics::default();
+        let (tx, _rx) = mpsc::channel(1);
+        let m = metrics.clone();
+        let run = tokio::spawn(async move {
+            transport
+                .run_with_deadlines(
+                    tx,
+                    Arc::new(AtomicU64::new(0)),
+                    m,
+                    Duration::from_secs(5),
+                    Duration::from_secs(30),
+                    None,
+                )
+                .await
+        });
+
+        sleep(Duration::from_millis(300)).await;
+        run.abort();
+        assert!(
+            metrics.snapshot().ingest_backpressure > 0,
+            "a stalled consumer must surface as backpressure, not silence"
+        );
+    }
+
+    #[test]
+    fn default_stale_after_is_sixty_seconds() {
+        assert_eq!(
+            SilentHooks(String::new()).stale_after(),
+            Duration::from_secs(60)
+        );
+        assert_eq!(
+            crate::framework::protocol::DEFAULT_STALE_AFTER,
+            Duration::from_secs(60)
         );
     }
 
@@ -575,12 +710,296 @@ mod tests {
                 SourceMetrics::default(),
                 Duration::from_secs(5),
                 Duration::from_millis(250),
+                None,
             )
             .await;
         assert!(
             matches!(exit, WssExitReason::Stale { .. }),
             "expected Stale, got: {exit}"
         );
+    }
+
+    struct AckDeadlineHooks {
+        url: String,
+        deadline: Option<Duration>,
+        frames: usize,
+    }
+
+    impl ProtocolHooks for AckDeadlineHooks {
+        fn endpoint(&self) -> String {
+            self.url.clone()
+        }
+        fn subscribe_frames(
+            &self,
+            _symbols: &[String],
+            _declared: &Prepared_DS,
+        ) -> Vec<Message> {
+            (0..self.frames)
+                .map(|i| Message::Text(format!("sub{i}").into()))
+                .collect()
+        }
+        fn subscribe_ack_deadline(&self) -> Option<Duration> {
+            self.deadline
+        }
+        fn classify_ack(&self, text: &str) -> AckOutcome {
+            if text.starts_with("ack") {
+                AckOutcome::Accepted
+            } else {
+                AckOutcome::NotAck
+            }
+        }
+    }
+
+    async fn spawn_acking_server(acks: usize) -> std::net::SocketAddr {
+        use futures_util::SinkExt as _;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            for i in 0..acks {
+                let _ = ws.send(Message::Text(format!("ack{i}").into())).await;
+            }
+            sleep(Duration::from_secs(30)).await;
+        });
+        addr
+    }
+
+    async fn run_ack_deadline_case(
+        acks: usize,
+        deadline: Option<Duration>,
+        stale_after: Duration,
+        metrics: SourceMetrics,
+    ) -> WssExitReason {
+        let addr = spawn_acking_server(acks).await;
+        let transport = WssTransport::<AckDeadlineHooks, NoopDecoder>::new(
+            Arc::new(AckDeadlineHooks {
+                url: format!("ws://{addr}"),
+                deadline,
+                frames: 2,
+            }),
+            vec!["TEST".to_string()],
+            Prepared_DS::all(),
+        );
+        let (tx, _rx) = mpsc::channel(8);
+        transport
+            .run_with_deadlines(
+                tx,
+                Arc::new(AtomicU64::new(0)),
+                metrics,
+                Duration::from_secs(5),
+                stale_after,
+                None,
+            )
+            .await
+    }
+
+    struct UnsubscribingHooks {
+        url: String,
+        farewell: Vec<&'static str>,
+    }
+
+    impl ProtocolHooks for UnsubscribingHooks {
+        fn endpoint(&self) -> String {
+            self.url.clone()
+        }
+        fn subscribe_frames(
+            &self,
+            _symbols: &[String],
+            _declared: &Prepared_DS,
+        ) -> Vec<Message> {
+            vec![Message::Text("sub".into())]
+        }
+        fn unsubscribe_frames(
+            &self,
+            _symbols: &[String],
+            _declared: &Prepared_DS,
+        ) -> Vec<Message> {
+            self.farewell
+                .iter()
+                .map(|f| Message::Text((*f).into()))
+                .collect()
+        }
+    }
+
+    async fn run_teardown_case(
+        farewell: Vec<&'static str>,
+    ) -> (WssExitReason, Vec<String>, Duration) {
+        use futures_util::StreamExt as _;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (seen_tx, mut seen_rx) = mpsc::channel::<String>(8);
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            while let Some(Ok(msg)) = ws.next().await {
+                match msg {
+                    Message::Text(t) => {
+                        let _ = seen_tx.send(t.to_string()).await;
+                    }
+                    Message::Close(_) => {
+                        let _ = seen_tx.send("CLOSE".to_string()).await;
+                        let _ = ws.close(None).await;
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+            sleep(Duration::from_secs(5)).await;
+        });
+
+        let (sd_tx, sd_rx) = watch::channel(false);
+        let transport = WssTransport::<UnsubscribingHooks, NoopDecoder>::new(
+            Arc::new(UnsubscribingHooks {
+                url: format!("ws://{addr}"),
+                farewell,
+            }),
+            vec!["TEST".to_string()],
+            Prepared_DS::all(),
+        );
+        let (tx, _rx) = mpsc::channel(8);
+        let run = tokio::spawn(async move {
+            transport
+                .run_with_deadlines(
+                    tx,
+                    Arc::new(AtomicU64::new(0)),
+                    SourceMetrics::default(),
+                    Duration::from_secs(5),
+                    Duration::from_secs(30),
+                    Some(sd_rx),
+                )
+                .await
+        });
+
+        assert_eq!(seen_rx.recv().await.unwrap(), "sub");
+        let started = std::time::Instant::now();
+        sd_tx.send(true).unwrap();
+        let exit = tokio::time::timeout(Duration::from_secs(3), run)
+            .await
+            .expect("transport must exit promptly on shutdown")
+            .unwrap();
+        let elapsed = started.elapsed();
+
+        let mut seen = Vec::new();
+        while let Ok(f) = seen_rx.try_recv() {
+            seen.push(f);
+        }
+        (exit, seen, elapsed)
+    }
+
+    #[tokio::test]
+    async fn shutdown_sends_unsubscribe_then_close_before_exit() {
+        let (exit, seen, elapsed) = run_teardown_case(vec!["unsub_a", "unsub_b"]).await;
+        assert_eq!(seen, vec!["unsub_a", "unsub_b", "CLOSE"]);
+        assert!(
+            matches!(exit, WssExitReason::StreamEnded),
+            "graceful teardown must not look like a failure, got: {exit}"
+        );
+        assert!(elapsed < Duration::from_secs(1), "took {elapsed:?}");
+    }
+
+    #[tokio::test]
+    async fn shutdown_without_unsubscribe_frames_exits_immediately_and_silently() {
+        let (exit, seen, elapsed) = run_teardown_case(Vec::new()).await;
+        assert!(seen.is_empty(), "venues declaring no farewell send nothing");
+        assert!(matches!(exit, WssExitReason::StreamEnded), "got: {exit}");
+        assert!(elapsed < Duration::from_millis(300), "took {elapsed:?}");
+    }
+
+    #[tokio::test]
+    async fn partial_subscribe_acks_exit_subscription_rejected_at_deadline() {
+        let metrics = SourceMetrics::default();
+        let exit = run_ack_deadline_case(
+            1,
+            Some(Duration::from_millis(250)),
+            Duration::from_secs(30),
+            metrics.clone(),
+        )
+        .await;
+        match exit {
+            WssExitReason::SubscriptionRejected(reason) => {
+                assert!(reason.contains("1 of 2"), "{reason}");
+            }
+            other => panic!("expected SubscriptionRejected, got: {other}"),
+        }
+        assert_eq!(metrics.snapshot().ack_timeouts, 1);
+    }
+
+    #[tokio::test]
+    async fn full_acks_disarm_the_deadline() {
+        let metrics = SourceMetrics::default();
+        let exit = run_ack_deadline_case(
+            2,
+            Some(Duration::from_millis(1_000)),
+            Duration::from_millis(2_500),
+            metrics.clone(),
+        )
+        .await;
+        assert!(
+            matches!(exit, WssExitReason::Stale { .. }),
+            "a fully acked socket must outlive its ack deadline, got: {exit}"
+        );
+        assert_eq!(metrics.snapshot().ack_timeouts, 0);
+    }
+
+    #[tokio::test]
+    async fn ack_deadline_after_data_stays_retryable() {
+        use futures_util::SinkExt as _;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let _ = ws.send(Message::Text("ack0".into())).await;
+            let _ = ws.send(Message::Text("payload".into())).await;
+            sleep(Duration::from_secs(30)).await;
+        });
+
+        let transport = WssTransport::<AckDeadlineHooks, NoopDecoder>::new(
+            Arc::new(AckDeadlineHooks {
+                url: format!("ws://{addr}"),
+                deadline: Some(Duration::from_millis(400)),
+                frames: 2,
+            }),
+            vec!["TEST".to_string()],
+            Prepared_DS::all(),
+        );
+        let metrics = SourceMetrics::default();
+        let (tx, _rx) = mpsc::channel(8);
+        let exit = transport
+            .run_with_deadlines(
+                tx,
+                Arc::new(AtomicU64::new(0)),
+                metrics.clone(),
+                Duration::from_secs(5),
+                Duration::from_secs(30),
+                None,
+            )
+            .await;
+
+        assert_eq!(metrics.snapshot().ack_timeouts, 1);
+        match exit {
+            WssExitReason::ConnectionFailed(msg) => {
+                assert!(msg.contains("after data"), "{msg}");
+            }
+            other => panic!(
+                "a partially acked socket that already streamed data must stay \
+                 retryable, got: {other}"
+            ),
+        }
+    }
+
+    #[tokio::test]
+    async fn no_deadline_means_silence_exits_stale_not_rejected() {
+        let metrics = SourceMetrics::default();
+        let exit =
+            run_ack_deadline_case(0, None, Duration::from_millis(250), metrics.clone())
+                .await;
+        assert!(
+            matches!(exit, WssExitReason::Stale { .. }),
+            "venues without a declared deadline keep today's behavior, got: {exit}"
+        );
+        assert_eq!(metrics.snapshot().ack_timeouts, 0);
     }
 
     #[tokio::test]
@@ -600,6 +1019,7 @@ mod tests {
                 SourceMetrics::default(),
                 Duration::from_millis(300),
                 Duration::from_secs(5),
+                None,
             )
             .await;
         match exit {

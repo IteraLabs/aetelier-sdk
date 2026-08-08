@@ -16,7 +16,7 @@ use super::common::{
 use aetelier_types::config::markets::market_config::{
     DataTypesSection, MarketSnapshotConfig,
 };
-use aetelier_types::exchanges::MarketType;
+use aetelier_types::exchanges::{MarketType, VenueEnvironment};
 
 use crate::errors::ConnectError;
 
@@ -107,6 +107,8 @@ pub struct DataWorkerCollect {
     /// Default market type (spot, perpetual, inverse).
     #[serde(default)]
     pub market_type: MarketType,
+    #[serde(default)]
+    pub environment: VenueEnvironment,
     /// Which data feeds to subscribe to.
     pub datatypes: DataTypesSection,
     /// Output sinks.
@@ -210,6 +212,7 @@ impl DataWorkerManifest {
                 exchange: entry.exchange.clone().unwrap_or_else(|| d.exchange.clone()),
                 symbol: entry.symbol.clone(),
                 market_type: entry.market_type.unwrap_or(d.market_type),
+                environment: d.environment,
                 datatypes: entry
                     .datatypes
                     .clone()
@@ -239,6 +242,25 @@ enabled = true
 [[workers]]
 symbol = "BTCUSDT"
 "#;
+
+    #[test]
+    fn data_worker_environment_defaults_production_and_parses_testnet() {
+        let resolved = DataWorkerManifest::from_str(MINIMAL_TOML)
+            .unwrap()
+            .resolve_all()
+            .remove(0);
+        assert_eq!(resolved.common.environment, VenueEnvironment::Production);
+
+        let testnet = MINIMAL_TOML.replace(
+            "exchange = \"bybit\"",
+            "exchange = \"bybit\"\nenvironment = \"testnet\"",
+        );
+        let resolved = DataWorkerManifest::from_str(&testnet)
+            .unwrap()
+            .resolve_all()
+            .remove(0);
+        assert_eq!(resolved.common.environment, VenueEnvironment::Testnet);
+    }
 
     const WITH_METADATA_TOML: &str = r#"
 [metadata]

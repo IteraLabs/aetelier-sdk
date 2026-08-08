@@ -109,6 +109,17 @@ pub struct UpdateFrequency {
     pub unit: TimeUnit,
 }
 
+impl UpdateFrequency {
+    pub fn as_micros(&self) -> u64 {
+        match self.unit {
+            TimeUnit::Nanos => self.value / 1_000,
+            TimeUnit::Micros => self.value,
+            TimeUnit::Millis => self.value * 1_000,
+            TimeUnit::Secs => self.value * 1_000_000,
+        }
+    }
+}
+
 /// `[pipeline]` — flush cadence.
 ///
 /// The flush interval in wall-clock time is

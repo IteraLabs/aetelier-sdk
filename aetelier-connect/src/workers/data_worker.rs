@@ -518,6 +518,7 @@ impl DataWorker {
         let exchange_name = self.core.exchange_name().to_string();
         let symbol = self.core.symbol().to_string();
         let datatypes = self.core.datatypes().clone();
+        let environment = self.core.environment();
         let channel_capacity = self.channel_capacity;
         let sinks = self.sinks;
         let mut cmd_rx = self.cmd_rx;
@@ -527,6 +528,24 @@ impl DataWorker {
             .get(exchange_name.as_str())
             .copied()
             .expect("run_framework only entered for a registered venue");
+
+        if let Err(e) = crate::framework::registry::admit_declared_depth(
+            &exchange_name,
+            adapter.max_declared_depth(),
+            datatypes.orderbook.enabled,
+            datatypes.orderbook.depth,
+        ) {
+            anyhow::bail!(e);
+        }
+
+        if let Err(e) = crate::framework::registry::admit_environment(
+            &exchange_name,
+            adapter.supports_environment(environment),
+            environment,
+        ) {
+            anyhow::bail!(e);
+        }
+
         let pair = adapter
             .profile()
             .symbol_codec
@@ -598,7 +617,8 @@ impl DataWorker {
         // establishes the socket; shutdown / Stop exits.
         while !stopped && !*shutdown.borrow() {
             let (dev_tx, mut dev_rx) = mpsc::channel(channel_capacity);
-            let adapter_handle = adapter.spawn(
+            let adapter_handle = adapter.spawn_env(
+                environment,
                 vec![symbol.clone()],
                 declared_set.clone(),
                 dev_tx,

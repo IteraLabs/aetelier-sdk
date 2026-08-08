@@ -41,7 +41,9 @@ fn hooks_for(venue: &str, symbol: &str) -> Option<Box<dyn ProtocolHooks>> {
         "bitso" => Some(Box::new(adapters::bitso::BitsoHooks)),
         "poloniex" => Some(Box::new(adapters::poloniex::PoloniexHooks)),
         "upbit" => Some(Box::new(adapters::upbit::UpbitHooks)),
-        "hyperliquid" => Some(Box::new(adapters::hyperliquid::HyperliquidHooks)),
+        "hyperliquid" => {
+            Some(Box::new(adapters::hyperliquid::HyperliquidHooks::default()))
+        }
         // HTX seeds via an in-band REQ built per symbol in prepare(); gzip
         // binary frames are inflated by frame_codec below.
         "htx" => Some(Box::new(adapters::htx::HtxHooks::new(vec![

@@ -10,7 +10,7 @@ use serde::Deserialize;
 use crate::clients::connection_manager::ConnectionManagerConfig;
 use aetelier_types::config::markets::market_config::DataTypesSection;
 use aetelier_types::config::markets::market_config::MarketSnapshotConfig;
-use aetelier_types::exchanges::MarketType;
+use aetelier_types::exchanges::{MarketType, VenueEnvironment};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // CommonWorkerFields
@@ -31,6 +31,8 @@ pub struct CommonWorkerFields {
     /// Defaults to `Spot` when not specified.
     #[serde(default)]
     pub market_type: MarketType,
+    #[serde(default)]
+    pub environment: VenueEnvironment,
     /// Which data feeds to subscribe to.
     pub datatypes: DataTypesSection,
     /// Broadcast channel capacity per topic (default: 8192).
@@ -130,6 +132,7 @@ impl From<&MarketSnapshotConfig> for CommonWorkerFields {
             exchange: cfg.exchange.name.clone(),
             symbol: cfg.symbol.name.clone(),
             market_type: MarketType::default(),
+            environment: VenueEnvironment::default(),
             datatypes: cfg.datatypes.clone(),
             channel_capacity: None,
             staleness_timeout_secs: None,
