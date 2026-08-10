@@ -67,6 +67,24 @@ pub trait ExchangeAdapter: Send + Sync + 'static {
         &[DD::Orderbook, DD::Trades]
     }
 
+    fn resubscribe_replays_trades(&self) -> bool {
+        false
+    }
+
+    fn max_declared_depth(&self) -> Option<usize> {
+        None
+    }
+
+    fn supports_environment(
+        &self,
+        environment: aetelier_types::exchanges::VenueEnvironment,
+    ) -> bool {
+        matches!(
+            environment,
+            aetelier_types::exchanges::VenueEnvironment::Production
+        )
+    }
+
     /// Spawn one Ingest connection carrying a SET of symbols, pumping
     /// `DomainEvent`s into `tx`.
     ///
@@ -84,6 +102,18 @@ pub trait ExchangeAdapter: Send + Sync + 'static {
         shutdown: tokio::sync::watch::Receiver<bool>,
         metrics: SourceMetrics,
     ) -> tokio::task::JoinHandle<TaskExit>;
+
+    fn spawn_env(
+        &self,
+        _environment: aetelier_types::exchanges::VenueEnvironment,
+        symbols: Vec<String>,
+        declared: aetelier_types::config::markets::market_config::DeclaredSet,
+        tx: tokio::sync::mpsc::Sender<DomainEvent>,
+        shutdown: tokio::sync::watch::Receiver<bool>,
+        metrics: SourceMetrics,
+    ) -> tokio::task::JoinHandle<TaskExit> {
+        self.spawn(symbols, declared, tx, shutdown, metrics)
+    }
 
     /// Decode and normalize one raw wire frame OFFLINE — the same
     /// decoder + normalizer `spawn` drives, without a socket. This is the
@@ -181,6 +211,40 @@ pub fn resolve(ids: &[&str]) -> Result<(), Vec<String>> {
     }
 }
 
+pub fn admit_declared_depth(
+    venue: &str,
+    cap: Option<usize>,
+    orderbook_enabled: bool,
+    declared: usize,
+) -> Result<(), String> {
+    if !orderbook_enabled {
+        return Ok(());
+    }
+    match cap {
+        Some(cap) if declared > cap => Err(format!(
+            "venue '{venue}' delivers at most {cap} book levels but this worker \
+             asks for depth {declared} — set `[collect.datatypes.orderbook] depth` \
+             to {cap} or less (an omitted depth defaults to 50)"
+        )),
+        _ => Ok(()),
+    }
+}
+
+pub fn admit_environment(
+    venue: &str,
+    supported: bool,
+    environment: aetelier_types::exchanges::VenueEnvironment,
+) -> Result<(), String> {
+    if supported {
+        return Ok(());
+    }
+    Err(format!(
+        "venue '{venue}' has no {environment} endpoint — remove `environment = \
+         \"{environment}\"` rather than collecting production data under a \
+         {environment} label"
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -212,6 +276,60 @@ mod tests {
             assert_eq!(adapter.profile().id, id, "profile.id must equal venue id");
         }
         assert!(resolve(&ids).is_ok());
+    }
+
+    #[test]
+    fn admit_declared_depth_refuses_beyond_cap_and_admits_within() {
+        assert!(admit_declared_depth("hyperliquid", Some(20), true, 50).is_err());
+        assert!(admit_declared_depth("hyperliquid", Some(20), true, 20).is_ok());
+        assert!(
+            admit_declared_depth("binance", None, true, 5000).is_ok(),
+            "venues declaring no cap are unconstrained"
+        );
+        let err = admit_declared_depth("hyperliquid", Some(20), true, 50).unwrap_err();
+        assert!(err.contains("20") && err.contains("50"), "{err}");
+    }
+
+    #[test]
+    fn declared_depth_is_irrelevant_when_the_book_feed_is_off() {
+        assert!(
+            admit_declared_depth("hyperliquid", Some(20), false, 50).is_ok(),
+            "a trades-only worker never subscribes a book, so the serde default \
+             depth of 50 must not refuse it"
+        );
+    }
+
+    #[test]
+    fn admit_environment_refuses_an_unsupported_deployment() {
+        use aetelier_types::exchanges::VenueEnvironment as VE;
+        assert!(admit_environment("hyperliquid", true, VE::Testnet).is_ok());
+        assert!(admit_environment("bybit", true, VE::Production).is_ok());
+        let err = admit_environment("bybit", false, VE::Testnet).unwrap_err();
+        assert!(err.contains("testnet"), "{err}");
+    }
+
+    #[test]
+    fn only_hyperliquid_declares_a_testnet_deployment() {
+        use aetelier_types::exchanges::VenueEnvironment as VE;
+        for (id, adapter) in registry() {
+            assert!(
+                adapter.supports_environment(VE::Production),
+                "{id} must support production"
+            );
+            assert_eq!(
+                adapter.supports_environment(VE::Testnet),
+                *id == "hyperliquid",
+                "{id} testnet support must be declared, never assumed"
+            );
+        }
+    }
+
+    #[test]
+    fn max_declared_depth_matches_the_twenty_level_l2book() {
+        let hl = registry().get("hyperliquid").copied().unwrap();
+        assert_eq!(hl.max_declared_depth(), Some(20));
+        let bybit = registry().get("bybit").copied().unwrap();
+        assert_eq!(bybit.max_declared_depth(), None);
     }
 
     #[test]

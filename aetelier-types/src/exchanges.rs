@@ -25,6 +25,26 @@ pub enum MarketType {
     Inverse,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+#[cfg_attr(feature = "wasm", derive(Tsify), tsify(into_wasm_abi, from_wasm_abi))]
+pub enum VenueEnvironment {
+    #[default]
+    #[serde(alias = "mainnet")]
+    Production,
+    #[serde(alias = "sandbox")]
+    Testnet,
+}
+
+impl fmt::Display for VenueEnvironment {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            VenueEnvironment::Production => write!(f, "production"),
+            VenueEnvironment::Testnet => write!(f, "testnet"),
+        }
+    }
+}
+
 impl fmt::Display for MarketType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {

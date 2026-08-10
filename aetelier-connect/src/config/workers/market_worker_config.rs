@@ -13,9 +13,9 @@ use super::common::{
     CommonWorkerFields, ManifestMetadata, OutputSinkConfig, ReconnectSection,
 };
 use aetelier_types::config::markets::market_config::{
-    DataTypesSection, MarketSnapshotConfig, SyncMode, TimeUnit, UpdateFrequency,
+    DataTypesSection, MarketSnapshotConfig, SyncMode, UpdateFrequency,
 };
-use aetelier_types::exchanges::MarketType;
+use aetelier_types::exchanges::{MarketType, VenueEnvironment};
 
 use crate::errors::ConnectError;
 
@@ -38,13 +38,7 @@ impl SyncSection {
     /// Grid period in microseconds (the platform timestamp standard;
     /// sub-microsecond configs round down).
     pub fn period_us(&self) -> u64 {
-        let v = self.update_frequency.value;
-        match self.update_frequency.unit {
-            TimeUnit::Nanos => v / 1_000,
-            TimeUnit::Micros => v,
-            TimeUnit::Millis => v * 1_000,
-            TimeUnit::Secs => v * 1_000_000,
-        }
+        self.update_frequency.as_micros()
     }
 }
 
@@ -80,12 +74,7 @@ impl ReconcileSection {
     pub fn emission_delay_us(&self) -> u64 {
         match &self.emission_delay {
             None => 1_000_000,
-            Some(f) => match f.unit {
-                TimeUnit::Nanos => f.value / 1_000,
-                TimeUnit::Micros => f.value,
-                TimeUnit::Millis => f.value * 1_000,
-                TimeUnit::Secs => f.value * 1_000_000,
-            },
+            Some(f) => f.as_micros(),
         }
     }
 }
@@ -111,6 +100,7 @@ pub struct MarketWorkerConfig {
     pub framework_ingest: bool,
     /// Live-reconciliation settings (`None` = feature off).
     pub reconcile: Option<ReconcileSection>,
+    pub emission_delay: Option<UpdateFrequency>,
 }
 
 impl MarketWorkerConfig {
@@ -127,6 +117,7 @@ impl MarketWorkerConfig {
             output: vec![OutputSinkConfig::Channel],
             framework_ingest: false,
             reconcile: None,
+            emission_delay: None,
         }
     }
 }
@@ -193,6 +184,8 @@ pub struct MarketWorkerCollect {
     /// Default market type (spot, perpetual, inverse).
     #[serde(default)]
     pub market_type: MarketType,
+    #[serde(default)]
+    pub environment: VenueEnvironment,
     /// Which data feeds to subscribe to.
     pub datatypes: DataTypesSection,
     /// Synchronisation parameters.
@@ -215,6 +208,8 @@ pub struct MarketWorkerCollect {
     /// Live-reconciliation section (`[collect.reconcile]`, optional).
     #[serde(default)]
     pub reconcile: Option<ReconcileSection>,
+    #[serde(default)]
+    pub emission_delay: Option<UpdateFrequency>,
     /// Ingest via the framework engine instead of the legacy raw path.
     /// Lives at `[collect]` (not `[collect.sync]`) so the platform's single
     /// `[collect]`-level injector reaches both Data and Market manifests.
@@ -292,6 +287,7 @@ impl MarketWorkerManifest {
                 exchange: entry.exchange.clone().unwrap_or_else(|| d.exchange.clone()),
                 symbol: entry.symbol.clone(),
                 market_type: entry.market_type.unwrap_or(d.market_type),
+                environment: d.environment,
                 datatypes: entry
                     .datatypes
                     .clone()
@@ -309,6 +305,7 @@ impl MarketWorkerManifest {
             output: entry.output.clone().unwrap_or_else(|| d.output.clone()),
             framework_ingest: entry.framework_ingest.unwrap_or(d.framework_ingest),
             reconcile: d.reconcile.clone(),
+            emission_delay: d.emission_delay.clone(),
         }
     }
 }
@@ -316,6 +313,52 @@ impl MarketWorkerManifest {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn environment_parses_testnet_and_defaults_production() {
+        let manifest = |env: &str| {
+            format!(
+                r#"
+[collect]
+exchange = "hyperliquid"
+{env}
+
+[collect.datatypes.orderbook]
+enabled = true
+depth = 20
+
+[collect.sync]
+sync_mode = "on_time"
+flush_threshold = 600
+
+[collect.sync.update_frequency]
+value = 100
+unit = "Millis"
+
+[[workers]]
+symbol = "BTC"
+"#
+            )
+        };
+        let resolve = |env: &str| {
+            MarketWorkerManifest::from_str(&manifest(env))
+                .unwrap()
+                .resolve_all()
+                .remove(0)
+                .common
+                .environment
+        };
+        assert_eq!(resolve(""), VenueEnvironment::Production);
+        assert_eq!(
+            resolve("environment = \"testnet\""),
+            VenueEnvironment::Testnet
+        );
+        assert_eq!(
+            resolve("environment = \"mainnet\""),
+            VenueEnvironment::Production,
+            "mainnet is the documented alias for production"
+        );
+    }
 
     #[test]
     fn reconcile_section_parses_with_defaults_and_resolves() {

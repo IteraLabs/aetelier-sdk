@@ -5,6 +5,7 @@ use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 use tokio_tungstenite::tungstenite::protocol::Message;
 
+use aetelier_types::exchanges::VenueEnvironment;
 use aetelier_types::orderbooks::NormalizedDelta;
 use aetelier_types::trades::{Trade, TradeSide};
 
@@ -14,7 +15,7 @@ use crate::framework::model::{
     DomainEvent, Normalizer, ReconstructionModel, epoch_to_us,
 };
 use crate::framework::protocol::DeclaredSet;
-use crate::framework::protocol::{Heartbeat, ProtocolHooks};
+use crate::framework::protocol::{AckOutcome, Heartbeat, ProtocolHooks};
 use crate::framework::registry::{ExchangeAdapter, ExchangeProfile, TaskExit};
 use crate::framework::symbol::SymbolCodec;
 
@@ -23,15 +24,46 @@ use crate::sources::hyperliquid::events::HyperliquidWssEvent;
 
 const HYPERLIQUID_WSS_URL: &str = "wss://api.hyperliquid.xyz/ws";
 
+const HYPERLIQUID_TESTNET_WSS_URL: &str = "wss://api.hyperliquid-testnet.xyz/ws";
+
 const PING_SECS: u64 = 30;
+
+const ACK_DEADLINE_SECS: u64 = 10;
+
+const STALE_AFTER_SECS: u64 = 45;
+
+const L2_BOOK_LEVELS: usize = 20;
 
 const HYPERLIQUID_CODEC: SymbolCodec = SymbolCodec::BareCoin { quote: "USDC" };
 
-pub struct HyperliquidHooks;
+#[derive(Debug, Clone, Copy, Default)]
+pub struct HyperliquidHooks {
+    pub environment: VenueEnvironment,
+}
+
+impl HyperliquidHooks {
+    pub fn new(environment: VenueEnvironment) -> Self {
+        Self { environment }
+    }
+}
+
+fn wss_url(environment: VenueEnvironment) -> &'static str {
+    match environment {
+        VenueEnvironment::Production => HYPERLIQUID_WSS_URL,
+        VenueEnvironment::Testnet => HYPERLIQUID_TESTNET_WSS_URL,
+    }
+}
+
+fn info_url(environment: VenueEnvironment) -> &'static str {
+    match environment {
+        VenueEnvironment::Production => HYPERLIQUID_INFO_URL,
+        VenueEnvironment::Testnet => HYPERLIQUID_TESTNET_INFO_URL,
+    }
+}
 
 impl ProtocolHooks for HyperliquidHooks {
     fn endpoint(&self) -> String {
-        HYPERLIQUID_WSS_URL.to_string()
+        wss_url(self.environment).to_string()
     }
 
     fn subscribe_frames(
@@ -39,18 +71,26 @@ impl ProtocolHooks for HyperliquidHooks {
         symbols: &[String],
         declared: &DeclaredSet,
     ) -> Vec<Message> {
-        use aetelier_types::config::markets::market_config::DeclaredDatatype as DD;
+        let channels = declared_channels(declared);
         let mut frames = Vec::new();
         for symbol in symbols {
-            if declared.contains(DD::Orderbook) {
-                frames.push(subscribe_frame("l2Book", symbol));
+            for channel in &channels {
+                frames.push(subscribe_frame(channel, symbol));
             }
-            if declared.contains(DD::Trades) {
-                frames.push(subscribe_frame("trades", symbol));
-            }
-            if declared.contains(DD::FundingRates) || declared.contains(DD::OpenInterest)
-            {
-                frames.push(subscribe_frame("activeAssetCtx", symbol));
+        }
+        frames
+    }
+
+    fn unsubscribe_frames(
+        &self,
+        symbols: &[String],
+        declared: &DeclaredSet,
+    ) -> Vec<Message> {
+        let channels = declared_channels(declared);
+        let mut frames = Vec::new();
+        for symbol in symbols {
+            for channel in &channels {
+                frames.push(method_frame("unsubscribe", channel, symbol));
             }
         }
         frames
@@ -62,17 +102,68 @@ impl ProtocolHooks for HyperliquidHooks {
             payload: Arc::new(|| r#"{"method":"ping"}"#.to_string()),
         }
     }
+
+    fn subscribe_ack_deadline(&self) -> Option<Duration> {
+        Some(Duration::from_secs(ACK_DEADLINE_SECS))
+    }
+
+    fn stale_after(&self) -> Duration {
+        Duration::from_secs(STALE_AFTER_SECS)
+    }
+
+    fn classify_ack(&self, text: &str) -> AckOutcome {
+        if !text.contains("\"subscriptionResponse\"") && !text.contains("\"error\"") {
+            return AckOutcome::NotAck;
+        }
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(text) else {
+            return AckOutcome::NotAck;
+        };
+        match v.get("channel").and_then(|c| c.as_str()) {
+            Some("subscriptionResponse") => {
+                match v.pointer("/data/method").and_then(|m| m.as_str()) {
+                    Some("subscribe") => AckOutcome::Accepted,
+                    _ => AckOutcome::NotAck,
+                }
+            }
+            Some("error") => AckOutcome::Rejected(
+                v.get("data")
+                    .and_then(|d| d.as_str())
+                    .unwrap_or("subscribe failed")
+                    .to_string(),
+            ),
+            _ => AckOutcome::NotAck,
+        }
+    }
 }
 
 fn subscribe_frame(channel: &str, symbol: &str) -> Message {
+    method_frame("subscribe", channel, symbol)
+}
+
+fn method_frame(method: &str, channel: &str, symbol: &str) -> Message {
     Message::Text(
         serde_json::json!({
-            "method": "subscribe",
+            "method": method,
             "subscription": { "type": channel, "coin": symbol }
         })
         .to_string()
         .into(),
     )
+}
+
+fn declared_channels(declared: &DeclaredSet) -> Vec<&'static str> {
+    use aetelier_types::config::markets::market_config::DeclaredDatatype as DD;
+    let mut channels = Vec::new();
+    if declared.contains(DD::Orderbook) {
+        channels.push("l2Book");
+    }
+    if declared.contains(DD::Trades) {
+        channels.push("trades");
+    }
+    if declared.contains(DD::FundingRates) || declared.contains(DD::OpenInterest) {
+        channels.push("activeAssetCtx");
+    }
+    channels
 }
 
 pub struct HyperliquidNormalizer {
@@ -258,6 +349,8 @@ fn normalize_trade(
 
 const HYPERLIQUID_INFO_URL: &str = "https://api.hyperliquid.xyz/info";
 
+const HYPERLIQUID_TESTNET_INFO_URL: &str = "https://api.hyperliquid-testnet.xyz/info";
+
 const SETTLEMENT_FETCH_DELAY_SECS: u64 = 5;
 
 const SETTLEMENT_BACKFILL_MS: u64 = 24 * 3600 * 1000;
@@ -272,6 +365,7 @@ fn now_us() -> u64 {
 }
 
 async fn settlement_poller(
+    environment: VenueEnvironment,
     symbols: Vec<String>,
     tx: mpsc::Sender<DomainEvent>,
     mut shutdown: watch::Receiver<bool>,
@@ -292,7 +386,8 @@ async fn settlement_poller(
             let mut attempts = 0;
             while attempts < 2 {
                 attempts += 1;
-                match fetch_settlements(&client, symbol, start_ms, &tx).await {
+                match fetch_settlements(&client, environment, symbol, start_ms, &tx).await
+                {
                     Ok(()) => break,
                     Err(e) => {
                         tracing::warn!(
@@ -324,6 +419,7 @@ async fn settlement_poller(
 
 async fn fetch_settlements(
     client: &reqwest::Client,
+    environment: VenueEnvironment,
     symbol: &str,
     start_ms: u64,
     tx: &mpsc::Sender<DomainEvent>,
@@ -336,7 +432,7 @@ async fn fetch_settlements(
     });
     let sent_at = std::time::Instant::now();
     let resp = client
-        .post(HYPERLIQUID_INFO_URL)
+        .post(info_url(environment))
         .json(&body)
         .send()
         .await
@@ -415,6 +511,18 @@ impl ExchangeAdapter for HyperliquidAdapter {
         &HYPERLIQUID_PROFILE
     }
 
+    fn resubscribe_replays_trades(&self) -> bool {
+        true
+    }
+
+    fn max_declared_depth(&self) -> Option<usize> {
+        Some(L2_BOOK_LEVELS)
+    }
+
+    fn supports_environment(&self, _environment: VenueEnvironment) -> bool {
+        true
+    }
+
     fn book_model(&self, _channel: &str) -> ReconstructionModel {
         ReconstructionModel::FullRefresh
     }
@@ -439,6 +547,25 @@ impl ExchangeAdapter for HyperliquidAdapter {
         shutdown: watch::Receiver<bool>,
         metrics: SourceMetrics,
     ) -> JoinHandle<TaskExit> {
+        self.spawn_env(
+            VenueEnvironment::Production,
+            symbols,
+            declared,
+            tx,
+            shutdown,
+            metrics,
+        )
+    }
+
+    fn spawn_env(
+        &self,
+        environment: VenueEnvironment,
+        symbols: Vec<String>,
+        declared: DeclaredSet,
+        tx: mpsc::Sender<DomainEvent>,
+        shutdown: watch::Receiver<bool>,
+        metrics: SourceMetrics,
+    ) -> JoinHandle<TaskExit> {
         use aetelier_types::config::markets::market_config::DeclaredDatatype as DD;
         let poll_settlements = declared.contains(DD::FundingRates);
         let normalizer = HyperliquidNormalizer {
@@ -451,6 +578,7 @@ impl ExchangeAdapter for HyperliquidAdapter {
         tokio::spawn(async move {
             let poller = poll_settlements.then(|| {
                 tokio::spawn(settlement_poller(
+                    environment,
                     poller_symbols,
                     poller_tx,
                     poller_shutdown,
@@ -458,7 +586,7 @@ impl ExchangeAdapter for HyperliquidAdapter {
             });
             let exit =
                 drive::<HyperliquidHooks, HyperliquidDecoder, HyperliquidNormalizer>(
-                    Arc::new(HyperliquidHooks),
+                    Arc::new(HyperliquidHooks::new(environment)),
                     symbols,
                     declared,
                     normalizer,
@@ -480,7 +608,7 @@ impl ExchangeAdapter for HyperliquidAdapter {
         symbols: &[String],
         declared: &crate::framework::protocol::DeclaredSet,
     ) -> Vec<String> {
-        HyperliquidHooks
+        HyperliquidHooks::default()
             .subscribe_frames(symbols, declared)
             .into_iter()
             .filter_map(|m| match m {
@@ -514,6 +642,146 @@ mod tests {
             px: px.to_string(),
             sz: sz.to_string(),
             n: 1,
+        }
+    }
+
+    const ACK_L2BOOK: &str = r#"{"channel":"subscriptionResponse","data":{"method":"subscribe","subscription":{"type":"l2Book","coin":"BTC","nSigFigs":null,"mantissa":null,"fast":false}}}"#;
+    const ACK_TRADES: &str = r#"{"channel":"subscriptionResponse","data":{"method":"subscribe","subscription":{"type":"trades","coin":"BTC"}}}"#;
+    const ACK_ASSET_CTX: &str = r#"{"channel":"subscriptionResponse","data":{"method":"subscribe","subscription":{"type":"activeAssetCtx","coin":"BTC"}}}"#;
+
+    #[test]
+    fn classify_ack_accepts_real_subscription_response_echoes() {
+        let hooks = HyperliquidHooks::default();
+        for frame in [ACK_L2BOOK, ACK_TRADES, ACK_ASSET_CTX] {
+            assert!(matches!(hooks.classify_ack(frame), AckOutcome::Accepted));
+        }
+        let echo: serde_json::Value = serde_json::from_str(ACK_L2BOOK).unwrap();
+        let sub = echo.pointer("/data/subscription").unwrap();
+        assert!(sub.get("nSigFigs").unwrap().is_null());
+        assert!(sub.get("mantissa").unwrap().is_null());
+        assert_eq!(sub.get("fast").and_then(|f| f.as_bool()), Some(false));
+    }
+
+    #[test]
+    fn trades_stay_sequence_unarmed_so_replay_is_deduped_by_id() {
+        let adapter = HyperliquidAdapter;
+        assert!(adapter.resubscribe_replays_trades());
+        let raw = r#"{"channel":"trades","data":[
+            {"coin":"BTC","side":"B","px":"1","sz":"1","time":1,"tid":259289531908492,"users":["0xa","0xb"],"hash":"0xc"}
+        ]}"#;
+        let event = HyperliquidDecoder::decode(raw).unwrap().unwrap();
+        let evs = HyperliquidNormalizer::default().normalize(event);
+        match &evs[0] {
+            DomainEvent::Trade { trade, sequence } => {
+                assert_eq!(
+                    sequence, &None,
+                    "hyperliquid tids are unordered, so no sequence may be fabricated"
+                );
+                assert_eq!(trade.id, "259289531908492");
+            }
+            other => panic!("expected Trade, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn endpoint_follows_environment() {
+        assert_eq!(
+            HyperliquidHooks::default().endpoint(),
+            "wss://api.hyperliquid.xyz/ws",
+            "an unset environment stays on mainnet"
+        );
+        assert_eq!(
+            HyperliquidHooks::new(VenueEnvironment::Production).endpoint(),
+            "wss://api.hyperliquid.xyz/ws"
+        );
+        assert_eq!(
+            HyperliquidHooks::new(VenueEnvironment::Testnet).endpoint(),
+            "wss://api.hyperliquid-testnet.xyz/ws"
+        );
+    }
+
+    #[test]
+    fn settlement_info_url_follows_environment() {
+        assert_eq!(
+            info_url(VenueEnvironment::Production),
+            "https://api.hyperliquid.xyz/info"
+        );
+        assert_eq!(
+            info_url(VenueEnvironment::Testnet),
+            "https://api.hyperliquid-testnet.xyz/info"
+        );
+    }
+
+    #[test]
+    fn stale_after_undercuts_the_venue_sixty_second_close_rule() {
+        let stale = HyperliquidHooks::default().stale_after();
+        assert!(
+            stale < Duration::from_secs(60),
+            "must detect silence before the venue closes the socket"
+        );
+        assert!(
+            Duration::from_secs(PING_SECS) < stale,
+            "our own ping cadence must refresh the socket inside the window"
+        );
+    }
+
+    #[test]
+    fn unsubscribe_frames_mirror_subscribe_frames_per_channel() {
+        let symbols = vec!["BTC".to_string()];
+        let declared = DeclaredSet::all();
+        let subs = HyperliquidHooks::default().subscribe_frames(&symbols, &declared);
+        let unsubs = HyperliquidHooks::default().unsubscribe_frames(&symbols, &declared);
+        assert_eq!(subs.len(), unsubs.len());
+        for (sub, unsub) in subs.iter().zip(unsubs.iter()) {
+            let (Message::Text(s), Message::Text(u)) = (sub, unsub) else {
+                panic!("expected text frames");
+            };
+            let s: serde_json::Value = serde_json::from_str(s).unwrap();
+            let u: serde_json::Value = serde_json::from_str(u).unwrap();
+            assert_eq!(s["method"], "subscribe");
+            assert_eq!(u["method"], "unsubscribe");
+            assert_eq!(s["subscription"], u["subscription"]);
+        }
+    }
+
+    #[test]
+    fn subscribe_ack_deadline_is_ten_seconds() {
+        assert_eq!(
+            HyperliquidHooks::default().subscribe_ack_deadline(),
+            Some(Duration::from_secs(10))
+        );
+    }
+
+    #[test]
+    fn classify_ack_rejects_error_channel_with_reason() {
+        let frame = r#"{"channel":"error","data":"Error parsing JSON into valid websocket request: {}"}"#;
+        match HyperliquidHooks::default().classify_ack(frame) {
+            AckOutcome::Rejected(reason) => {
+                assert!(reason.contains("Error parsing JSON"), "{reason}");
+            }
+            other => panic!("expected Rejected, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_ack_ignores_data_pong_and_unsubscribe_echoes() {
+        let hooks = HyperliquidHooks::default();
+        let unsubscribe_echo = r#"{"channel":"subscriptionResponse","data":{"method":"unsubscribe","subscription":{"type":"trades","coin":"BTC"}}}"#;
+        let trade = r#"{"channel":"trades","data":[{"coin":"BTC","side":"B","px":"1","sz":"1","time":1,"tid":1,"users":["0xa","0xb"],"hash":"0xc"}]}"#;
+        for frame in [unsubscribe_echo, trade, r#"{"channel":"pong"}"#] {
+            assert!(matches!(hooks.classify_ack(frame), AckOutcome::NotAck));
+        }
+    }
+
+    #[test]
+    fn decoder_swallows_error_channel_and_unknown_channels_as_none() {
+        for frame in [
+            r#"{"channel":"error","data":"boom"}"#,
+            r#"{"channel":"pong"}"#,
+            ACK_L2BOOK,
+            r#"{"channel":"someFutureChannel","data":{}}"#,
+        ] {
+            assert!(HyperliquidDecoder::decode(frame).unwrap().is_none());
         }
     }
 
@@ -597,9 +865,10 @@ mod tests {
     fn subscribe_frames_filter_on_declared_datatypes() {
         use aetelier_types::config::markets::market_config::DeclaredDatatype as DD;
         let symbols = vec!["BTC".to_string()];
-        let both = HyperliquidHooks.subscribe_frames(&symbols, &DeclaredSet::all());
+        let both =
+            HyperliquidHooks::default().subscribe_frames(&symbols, &DeclaredSet::all());
         assert_eq!(both.len(), 3);
-        let ob_only = HyperliquidHooks
+        let ob_only = HyperliquidHooks::default()
             .subscribe_frames(&symbols, &DeclaredSet::only(DD::Orderbook));
         assert_eq!(ob_only.len(), 1);
         let Message::Text(body) = &ob_only[0] else {
@@ -609,10 +878,10 @@ mod tests {
         assert_eq!(v["method"], "subscribe");
         assert_eq!(v["subscription"]["type"], "l2Book");
         assert_eq!(v["subscription"]["coin"], "BTC");
-        let trades_only =
-            HyperliquidHooks.subscribe_frames(&symbols, &DeclaredSet::only(DD::Trades));
+        let trades_only = HyperliquidHooks::default()
+            .subscribe_frames(&symbols, &DeclaredSet::only(DD::Trades));
         assert_eq!(trades_only.len(), 1);
-        let none = HyperliquidHooks.subscribe_frames(
+        let none = HyperliquidHooks::default().subscribe_frames(
             &symbols,
             &DeclaredSet::only(DD::Orderbook).without(DD::Orderbook),
         );
@@ -672,7 +941,8 @@ mod tests {
     fn subscribe_adds_asset_ctx_only_for_derivative_datatypes() {
         use aetelier_types::config::markets::market_config::DeclaredDatatype as DD;
         let symbols = vec!["BTC".to_string()];
-        let all = HyperliquidHooks.subscribe_frames(&symbols, &DeclaredSet::all());
+        let all =
+            HyperliquidHooks::default().subscribe_frames(&symbols, &DeclaredSet::all());
         assert_eq!(all.len(), 3);
         let Message::Text(body) = &all[2] else {
             panic!("expected a text frame");
@@ -680,18 +950,18 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(body).unwrap();
         assert_eq!(v["subscription"]["type"], "activeAssetCtx");
 
-        let funding_only = HyperliquidHooks
+        let funding_only = HyperliquidHooks::default()
             .subscribe_frames(&symbols, &DeclaredSet::only(DD::FundingRates));
         assert_eq!(funding_only.len(), 1);
 
-        let book_trades = HyperliquidHooks.subscribe_frames(
+        let book_trades = HyperliquidHooks::default().subscribe_frames(
             &symbols,
             &DeclaredSet::only(DD::Orderbook)
                 .without(DD::Orderbook)
                 .without(DD::Trades),
         );
         assert!(book_trades.is_empty());
-        let spot_style = HyperliquidHooks.subscribe_frames(
+        let spot_style = HyperliquidHooks::default().subscribe_frames(
             &symbols,
             &DeclaredSet::all()
                 .without(DD::FundingRates)

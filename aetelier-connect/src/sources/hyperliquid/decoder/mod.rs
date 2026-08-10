@@ -38,7 +38,15 @@ impl WssDecoder for HyperliquidDecoder {
                     .map_err(|e| Box::new(ExchangeError::JsonError(e)))?;
                 Ok(Some(HyperliquidWssEvent::AssetCtx(msg)))
             }
-            _ => Ok(None),
+            Some("subscriptionResponse") | Some("pong") => Ok(None),
+            Some("error") => {
+                tracing::error!(frame = text, "hyperliquid.wss.error_channel");
+                Ok(None)
+            }
+            _ => {
+                tracing::debug!(frame = text, "hyperliquid.wss.unknown_channel");
+                Ok(None)
+            }
         }
     }
 }

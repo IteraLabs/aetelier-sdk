@@ -697,3 +697,47 @@ fn zero_holdback_is_the_historical_behaviour() {
         "boundary crossing emits immediately at W=0"
     );
 }
+
+#[test]
+fn without_hold_back_a_trade_arriving_after_its_boundary_is_lost() {
+    let period_us = 500_000;
+    let mut sync = MarketSynchronizer::external_clock(period_us);
+    sync.on_time(10_000_000);
+
+    sync.on_trade(make_trade(10_400_000, 50_000.0, 0.1));
+    sync.on_time(10_500_000);
+    sync.on_trade(make_trade(10_450_000, 50_000.0, 0.2));
+    sync.on_time(11_000_000);
+
+    assert_eq!(sync.late_events_dropped, 1);
+    let rows = sync.drain();
+    let total: usize = rows.iter().map(|r| r.trades.len()).sum();
+    assert_eq!(total, 1, "the late print never reaches a row");
+}
+
+#[test]
+fn hold_back_lands_a_late_trade_in_its_own_true_row() {
+    let period_us = 500_000;
+    let mut sync = MarketSynchronizer::external_clock(period_us);
+    sync.set_emission_delay_us(1_000_000);
+    sync.on_time(10_000_000);
+
+    sync.on_trade(make_trade(10_400_000, 50_000.0, 0.1));
+    sync.on_time(10_500_000);
+    sync.on_trade(make_trade(10_450_000, 50_000.0, 0.2));
+    sync.on_time(11_000_000);
+    sync.on_time(12_000_000);
+
+    assert_eq!(sync.late_events_dropped, 0, "hold-back keeps the row open");
+    let rows = sync.drain();
+    let total: usize = rows.iter().map(|r| r.trades.len()).sum();
+    assert_eq!(total, 2, "both prints survive");
+
+    let row = rows
+        .iter()
+        .find(|r| r.trades.len() == 2)
+        .expect("both prints belong to the same true row");
+    let mut stamps: Vec<u64> = row.trades.iter().map(|t| t.source_trade_ts_us).collect();
+    stamps.sort_unstable();
+    assert_eq!(stamps, vec![10_400_000, 10_450_000]);
+}

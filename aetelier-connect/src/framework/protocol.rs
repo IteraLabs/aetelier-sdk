@@ -139,6 +139,8 @@ mod codec_tests {
     }
 }
 
+pub const DEFAULT_STALE_AFTER: Duration = Duration::from_secs(60);
+
 /// Result of a venue's pre-connect bootstrap (`ProtocolHooks::prepare`).
 #[derive(Default)]
 pub struct Prepared {
@@ -187,6 +189,22 @@ pub trait ProtocolHooks: Send + Sync + 'static {
     /// not an ack (no behavior change for venues without an envelope).
     fn classify_ack(&self, _text: &str) -> AckOutcome {
         AckOutcome::NotAck
+    }
+
+    fn subscribe_ack_deadline(&self) -> Option<Duration> {
+        None
+    }
+
+    fn unsubscribe_frames(
+        &self,
+        _symbols: &[String],
+        _declared: &DeclaredSet,
+    ) -> Vec<Message> {
+        Vec::new()
+    }
+
+    fn stale_after(&self) -> Duration {
+        DEFAULT_STALE_AFTER
     }
 
     /// Transport frame encoding. Default: plain text JSON.
