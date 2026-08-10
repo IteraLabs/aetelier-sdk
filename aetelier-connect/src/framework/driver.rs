@@ -32,6 +32,9 @@ pub const DEFAULT_RAW_BUFFER: usize = 4096;
 /// grace (docker default 10 s) for the final sink flush and teardown.
 pub const STOP_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 
+pub const CLOSE_HANDSHAKE_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(1);
+
 /// Drive one venue connection end-to-end. `N::Event` must equal `D::Event`
 /// (the normalizer consumes exactly what the decoder yields). `metrics` is the
 /// worker's shared counter handle — the transport bumps msgs/decode/drop
@@ -56,7 +59,12 @@ where
     let (raw_tx, mut raw_rx) = mpsc::channel::<(D::Event, u64)>(buffer);
     let rtt_us = Arc::new(AtomicU64::new(0));
     let transport = WssTransport::<H, D>::new(hooks, symbols, declared);
-    let transport_task = tokio::spawn(transport.run(raw_tx, rtt_us.clone(), metrics));
+    let mut transport_task = tokio::spawn(transport.run(
+        raw_tx,
+        rtt_us.clone(),
+        metrics,
+        Some(shutdown.clone()),
+    ));
     let mut recv_seq: u64 = 0;
 
     loop {
@@ -67,7 +75,12 @@ where
             // the outstanding artifacts are the caller's `partial` outcome.
             changed = shutdown.changed() => {
                 if changed.is_err() || *shutdown.borrow() {
-                    transport_task.abort();
+                    if tokio::time::timeout(CLOSE_HANDSHAKE_TIMEOUT, &mut transport_task)
+                        .await
+                        .is_err()
+                    {
+                        transport_task.abort();
+                    }
                     let flush =
                         drain_buffered(&mut raw_rx, &normalizer, &tx, &rtt_us, recv_seq);
                     return match tokio::time::timeout(STOP_DRAIN_TIMEOUT, flush).await {
@@ -90,7 +103,19 @@ where
                     }
                 }
                 // Transport closed its sender: await the exit reason and map it.
-                None => return exit_to_task(transport_task.await),
+                None => {
+                    if *shutdown.borrow() {
+                        let flush = drain_buffered(
+                            &mut raw_rx, &normalizer, &tx, &rtt_us, recv_seq,
+                        );
+                        return match tokio::time::timeout(STOP_DRAIN_TIMEOUT, flush).await
+                        {
+                            Ok(()) => TaskExit::Completed,
+                            Err(_) => TaskExit::DrainTimedOut,
+                        };
+                    }
+                    return exit_to_task(transport_task.await);
+                }
             },
         }
     }
@@ -207,5 +232,84 @@ mod tests {
         let flush = drain_buffered(&mut raw_rx, &StubNormalizer, &tx, &rtt, 0);
         let out = tokio::time::timeout(STOP_DRAIN_TIMEOUT, flush).await;
         assert!(out.is_err(), "stuck consumer must trip the drain bound");
+    }
+}
+
+#[cfg(test)]
+mod probe_driver {
+    use super::*;
+    use crate::framework::protocol::{DeclaredSet, ProtocolHooks};
+    use tokio_tungstenite::tungstenite::protocol::Message;
+
+    struct QuietHooks(String);
+    impl ProtocolHooks for QuietHooks {
+        fn endpoint(&self) -> String {
+            self.0.clone()
+        }
+        fn subscribe_frames(&self, _s: &[String], _d: &DeclaredSet) -> Vec<Message> {
+            vec![Message::Text("sub".into())]
+        }
+    }
+
+    struct NoopDec;
+    impl crate::clients::wss::WssDecoder for NoopDec {
+        type Event = u64;
+        fn decode(_t: &str) -> Result<Option<u64>, Box<crate::errors::ExchangeError>> {
+            Ok(None)
+        }
+    }
+
+    struct NoopNorm;
+    impl Normalizer for NoopNorm {
+        type Event = u64;
+        fn normalize(&self, _e: u64) -> Vec<DomainEvent> {
+            Vec::new()
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn shutdown_taskexit_is_stable() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            loop {
+                let (stream, _) = listener.accept().await.unwrap();
+                tokio::spawn(async move {
+                    let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+                    use futures_util::StreamExt as _;
+                    while ws.next().await.is_some() {}
+                });
+            }
+        });
+
+        let mut failed = 0;
+        let mut completed = 0;
+        for _ in 0..200 {
+            let (sd_tx, sd_rx) = watch::channel(false);
+            let (tx, _rx) = mpsc::channel::<DomainEvent>(64);
+            let h = tokio::spawn(drive::<QuietHooks, NoopDec, NoopNorm>(
+                Arc::new(QuietHooks(format!("ws://{addr}"))),
+                vec!["T".into()],
+                DeclaredSet::all(),
+                NoopNorm,
+                tx,
+                sd_rx,
+                64,
+                SourceMetrics::default(),
+            ));
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            sd_tx.send(true).unwrap();
+            match h.await.unwrap() {
+                TaskExit::Completed => completed += 1,
+                other => {
+                    failed += 1;
+                    if failed == 1 {
+                        println!("FIRST NON-COMPLETED: {other:?}");
+                    }
+                }
+            }
+        }
+        println!("completed={completed} non_completed={failed}");
+        assert_eq!(failed, 0, "graceful shutdown must always be Completed");
     }
 }

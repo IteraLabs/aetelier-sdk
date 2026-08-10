@@ -52,6 +52,46 @@ use super::topic_publisher::{TopicMessage, TopicRegistry};
 /// How often (ms) the worker publishes its status to the registry.
 const STATUS_PUBLISH_INTERVAL_MS: u64 = 250;
 
+const REPLAY_DEDUP_CAPACITY: usize = 4096;
+
+fn wire_ts_regressed(last_ts_us: &mut u64, ts_us: u64) -> bool {
+    if ts_us < *last_ts_us {
+        return true;
+    }
+    *last_ts_us = ts_us;
+    false
+}
+
+#[derive(Debug)]
+struct SeenTradeIds {
+    order: std::collections::VecDeque<u64>,
+    ids: std::collections::HashSet<u64>,
+    capacity: usize,
+}
+
+impl SeenTradeIds {
+    fn with_capacity(capacity: usize) -> Self {
+        Self {
+            order: std::collections::VecDeque::with_capacity(capacity),
+            ids: std::collections::HashSet::with_capacity(capacity),
+            capacity,
+        }
+    }
+
+    fn insert(&mut self, id: u64) -> bool {
+        if !self.ids.insert(id) {
+            return false;
+        }
+        self.order.push_back(id);
+        if self.order.len() > self.capacity
+            && let Some(evicted) = self.order.pop_front()
+        {
+            self.ids.remove(&evicted);
+        }
+        true
+    }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // MarketWorkerReport
 // ─────────────────────────────────────────────────────────────────────────────
@@ -102,6 +142,7 @@ pub struct MarketWorker {
     /// `feed_*` functions.  For server-filtered exchanges (Bybit, Kraken)
     /// this is a no-op ceiling that never binds.
     ob_depth: usize,
+    environment: aetelier_types::exchanges::VenueEnvironment,
     /// Command receiver from the registry (`None` when running standalone).
     cmd_rx: Option<mpsc::Receiver<WorkerCommand>>,
     /// Status publisher for the registry (`None` when running standalone).
@@ -182,9 +223,19 @@ impl MarketWorker {
                         .to_string(),
                 ));
             }
+            if config.emission_delay.is_some() {
+                return Err(ConnectError::Build(
+                    "emission_delay is set at both [collect] and \
+                     [collect.reconcile] — keep the one that owns the hold-back \
+                     window and remove the other"
+                        .to_string(),
+                ));
+            }
             // The disclosed latency cost: rows emit W after their boundary so
             // REST-recovered prints land in their true rows.
             sync.set_emission_delay_us(r.emission_delay_us());
+        } else if let Some(w) = &config.emission_delay {
+            sync.set_emission_delay_us(w.as_micros());
         }
 
         let channel_capacity = config.common.channel_capacity();
@@ -242,6 +293,7 @@ impl MarketWorker {
             _ => None,
         });
 
+        let environment = config.common.environment;
         Ok(Self {
             core,
             sync,
@@ -253,6 +305,7 @@ impl MarketWorker {
             clock_mode,
             period_us,
             ob_depth,
+            environment,
             cmd_rx: None,
             status_tx: None,
             framework_ingest,
@@ -375,6 +428,7 @@ impl MarketWorker {
             clock_mode,
             period_us,
             ob_depth,
+            environment: _,
             cmd_rx,
             status_tx,
             framework_ingest: _,
@@ -675,6 +729,7 @@ impl MarketWorker {
             clock_mode,
             period_us,
             ob_depth,
+            environment,
             mut cmd_rx,
             status_tx,
             gap_ledger,
@@ -695,6 +750,23 @@ impl MarketWorker {
                     "run_framework entered for unregistered venue '{exchange_name}'"
                 )
             })?;
+
+        if let Err(e) = crate::framework::registry::admit_declared_depth(
+            &exchange_name,
+            adapter.max_declared_depth(),
+            core.datatypes().orderbook.enabled,
+            ob_depth,
+        ) {
+            anyhow::bail!(e);
+        }
+
+        if let Err(e) = crate::framework::registry::admit_environment(
+            &exchange_name,
+            adapter.supports_environment(environment),
+            environment,
+        ) {
+            anyhow::bail!(e);
+        }
 
         let pair = adapter
             .profile()
@@ -789,6 +861,9 @@ impl MarketWorker {
         let trade_seq_carry: std::sync::Arc<
             std::sync::Mutex<std::collections::HashMap<TradingPair, u64>>,
         > = std::sync::Arc::default();
+        let mut seen_trade_ids = adapter
+            .resubscribe_replays_trades()
+            .then(|| SeenTradeIds::with_capacity(REPLAY_DEDUP_CAPACITY));
         // ── Live reconciliation (metered feature) ────────────────────────
         // A background task fetches venue REST trades AFTER the last print
         // the live stream delivered, on two bounded triggers: a gap-recovery
@@ -900,8 +975,11 @@ impl MarketWorker {
             if let Ok(mut fs) = feeds.lock() {
                 fs.mark_all_subscribing();
             }
+            let mut last_book_ts_us = 0u64;
+            let mut last_trade_ts_us = 0u64;
             let (dev_tx, dev_rx) = mpsc::channel(channel_capacity);
-            let adapter_handle = adapter.spawn(
+            let adapter_handle = adapter.spawn_env(
+                environment,
                 vec![symbol.clone()],
                 declared_set.clone(),
                 dev_tx,
@@ -1037,6 +1115,11 @@ impl MarketWorker {
                             if paused { continue; }
                             match ev {
                                 ReconstructedEvent::Book { pair, ts_us, book } => {
+                                    if ts_us > 0
+                                        && wire_ts_regressed(&mut last_book_ts_us, ts_us)
+                                    {
+                                        metrics.bump_out_of_order_frames();
+                                    }
                                     if ts_us > 0 {
                                         let now_us = std::time::SystemTime::now()
                                             .duration_since(std::time::UNIX_EPOCH)
@@ -1061,6 +1144,21 @@ impl MarketWorker {
                                     sync.on_funding_settlement(fs);
                                 }
                                 ReconstructedEvent::Trade(trade) => {
+                                    if let Some(seen) = seen_trade_ids.as_mut()
+                                        && let Ok(tid) = trade.id.parse::<u64>()
+                                        && !seen.insert(tid)
+                                    {
+                                        metrics.bump_replay_duplicates();
+                                        continue;
+                                    }
+                                    if trade.source_trade_ts_us > 0
+                                        && wire_ts_regressed(
+                                            &mut last_trade_ts_us,
+                                            trade.source_trade_ts_us,
+                                        )
+                                    {
+                                        metrics.bump_out_of_order_frames();
+                                    }
                                     if trade.source_trade_ts_us > 0 {
                                         let now_us = std::time::SystemTime::now()
                                             .duration_since(std::time::UNIX_EPOCH)
@@ -2210,6 +2308,146 @@ symbol = "BTCUSDT"
             w.sync.emission_delay_us(),
             1_000_000,
             "default 1s hold-back applied to the synchronizer"
+        );
+    }
+
+    fn hold_back_manifest(collect_delay: Option<&str>, reconcile: bool) -> String {
+        let delay = collect_delay
+            .map(|d| format!("\n[collect.emission_delay]\n{d}\n"))
+            .unwrap_or_default();
+        let reconcile = if reconcile {
+            "\n[collect.reconcile]\nenabled = true\n"
+        } else {
+            ""
+        };
+        format!(
+            r#"
+[collect]
+exchange = "binance"
+framework_ingest = true
+
+[collect.datatypes.orderbook]
+enabled = true
+depth = 25
+
+[collect.datatypes.trades]
+enabled = true
+
+[collect.sync]
+sync_mode = "on_time"
+flush_threshold = 600
+
+[collect.sync.update_frequency]
+value = 100
+unit = "Millis"
+{delay}{reconcile}
+[[workers]]
+symbol = "BTCUSDT"
+"#
+        )
+    }
+
+    fn resolve_hold_back(toml: &str) -> MarketWorkerConfig {
+        crate::config::workers::MarketWorkerManifest::from_str(toml)
+            .unwrap()
+            .resolve_all()
+            .remove(0)
+    }
+
+    #[test]
+    fn collect_emission_delay_parses_and_resolves() {
+        let cfg = resolve_hold_back(&hold_back_manifest(
+            Some("value = 500\nunit = \"Millis\""),
+            false,
+        ));
+        assert_eq!(cfg.emission_delay.as_ref().unwrap().as_micros(), 500_000);
+    }
+
+    #[test]
+    fn emission_delay_absent_resolves_none() {
+        let cfg = resolve_hold_back(&hold_back_manifest(None, false));
+        assert!(cfg.emission_delay.is_none());
+    }
+
+    #[test]
+    fn collect_emission_delay_applies_without_reconcile() {
+        let cfg = resolve_hold_back(&hold_back_manifest(
+            Some("value = 250\nunit = \"Millis\""),
+            false,
+        ));
+        let w = MarketWorker::from_config(cfg).unwrap();
+        assert_eq!(w.sync.emission_delay_us(), 250_000);
+    }
+
+    #[test]
+    fn emission_delay_conflicts_with_enabled_reconcile_loudly() {
+        let cfg = resolve_hold_back(&hold_back_manifest(
+            Some("value = 250\nunit = \"Millis\""),
+            true,
+        ));
+        match MarketWorker::from_config(cfg) {
+            Ok(_) => panic!("two hold-back sources must not resolve silently"),
+            Err(e) => assert!(e.to_string().contains("emission_delay"), "{e}"),
+        }
+    }
+
+    #[test]
+    fn reconcile_default_hold_back_stays_one_second() {
+        let cfg = resolve_hold_back(&hold_back_manifest(None, true));
+        let w = MarketWorker::from_config(cfg).unwrap();
+        assert_eq!(w.sync.emission_delay_us(), 1_000_000);
+    }
+
+    #[test]
+    fn regressed_timestamp_counts_once_and_does_not_advance() {
+        let mut last = 0u64;
+        assert!(!wire_ts_regressed(&mut last, 100));
+        assert!(!wire_ts_regressed(&mut last, 200));
+        assert!(
+            wire_ts_regressed(&mut last, 150),
+            "a step back is a regress"
+        );
+        assert_eq!(
+            last, 200,
+            "a regressing frame must not rewind the watermark"
+        );
+        assert!(!wire_ts_regressed(&mut last, 250));
+    }
+
+    #[test]
+    fn equal_timestamps_are_not_out_of_order() {
+        let mut last = 0u64;
+        assert!(!wire_ts_regressed(&mut last, 1_700_000_000_000_000));
+        assert!(
+            !wire_ts_regressed(&mut last, 1_700_000_000_000_000),
+            "two frames inside the same wire millisecond are legal"
+        );
+    }
+
+    #[test]
+    fn seen_trade_ids_flags_duplicates_and_evicts_at_capacity() {
+        let mut seen = SeenTradeIds::with_capacity(3);
+        assert!(seen.insert(1), "first sighting is fresh");
+        assert!(!seen.insert(1), "a replayed print is a duplicate");
+        assert!(seen.insert(2));
+        assert!(seen.insert(3));
+        assert!(seen.insert(4), "capacity reached, oldest evicted");
+        assert!(seen.insert(1), "evicted ids are forgotten, not remembered");
+        assert!(!seen.insert(3), "ids still inside the window stay known");
+    }
+
+    #[test]
+    fn declares_resubscribe_trade_replay_and_unarmed_sequence() {
+        use crate::framework::registry::registry;
+        let hl = registry().get("hyperliquid").copied().unwrap();
+        assert!(
+            hl.resubscribe_replays_trades(),
+            "hyperliquid replays ~30 prints on every subscribe"
+        );
+        let bybit = registry().get("bybit").copied().unwrap();
+        assert!(
+            !bybit.resubscribe_replays_trades(),
+            "dedup stays off for venues that do not replay"
         );
     }
 

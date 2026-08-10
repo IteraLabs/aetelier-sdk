@@ -84,6 +84,10 @@ struct SourceMetricsInner {
     reseed_exhausted: AtomicU64,
     undeclared_dropped: AtomicU64,
     seeds_abandoned: AtomicU64,
+    ack_timeouts: AtomicU64,
+    replay_duplicates: AtomicU64,
+    out_of_order_frames: AtomicU64,
+    ingest_backpressure: AtomicU64,
 }
 
 /// Confidence class of the trade-loss accounting on this source, encoded as a
@@ -173,6 +177,14 @@ pub struct SourceMetricsSnapshot {
     /// requested but no book appeared" ambiguity.
     #[serde(default)]
     pub seeds_abandoned: u64,
+    #[serde(default)]
+    pub ack_timeouts: u64,
+    #[serde(default)]
+    pub replay_duplicates: u64,
+    #[serde(default)]
+    pub out_of_order_frames: u64,
+    #[serde(default)]
+    pub ingest_backpressure: u64,
 }
 
 impl SourceMetrics {
@@ -187,6 +199,22 @@ impl SourceMetrics {
     /// `n` events were dropped before emission (e.g. an unparseable trade side).
     pub fn add_dropped_frames(&self, n: u64) {
         self.inner.dropped_frames.fetch_add(n, Ordering::Relaxed);
+    }
+    pub fn bump_ack_timeouts(&self) {
+        self.inner.ack_timeouts.fetch_add(1, Ordering::Relaxed);
+    }
+    pub fn bump_replay_duplicates(&self) {
+        self.inner.replay_duplicates.fetch_add(1, Ordering::Relaxed);
+    }
+    pub fn bump_out_of_order_frames(&self) {
+        self.inner
+            .out_of_order_frames
+            .fetch_add(1, Ordering::Relaxed);
+    }
+    pub fn bump_ingest_backpressure(&self) {
+        self.inner
+            .ingest_backpressure
+            .fetch_add(1, Ordering::Relaxed);
     }
     /// The transport reconnected (one reconnect-loop iteration).
     pub fn bump_reconnects(&self) {
@@ -316,6 +344,10 @@ impl SourceMetrics {
             reseed_exhausted: i.reseed_exhausted.load(Ordering::Relaxed),
             undeclared_dropped: i.undeclared_dropped.load(Ordering::Relaxed),
             seeds_abandoned: i.seeds_abandoned.load(Ordering::Relaxed),
+            ack_timeouts: i.ack_timeouts.load(Ordering::Relaxed),
+            replay_duplicates: i.replay_duplicates.load(Ordering::Relaxed),
+            out_of_order_frames: i.out_of_order_frames.load(Ordering::Relaxed),
+            ingest_backpressure: i.ingest_backpressure.load(Ordering::Relaxed),
         }
     }
 }

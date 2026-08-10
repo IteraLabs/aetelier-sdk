@@ -499,7 +499,10 @@ fn print_funding_stats(root: &Path) {
         println!("    Last:  {} us ({})", last_ts, format_ts_us(last_ts));
         println!("    Span:  {:.3}s", span_s);
 
-        let rates: Vec<f64> = all_rates.iter().map(|r| r.funding_rate).collect();
+        let rates: Vec<f64> = all_rates
+            .iter()
+            .map(|r| r.funding_rate.to_f64().unwrap_or(0.0))
+            .collect();
         let (r_min, r_max, r_mean) = stats_f64(&rates);
         let ann_factor = 3.0 * 365.0;
 
@@ -572,8 +575,18 @@ fn print_open_interest_stats(root: &Path) {
         println!("    Last:  {} us ({})", last_ts, format_ts_us(last_ts));
         println!("    Span:  {:.3}s", span_s);
 
-        let oi_values: Vec<f64> = all_oi.iter().map(|o| o.open_interest).collect();
-        let oi_usd: Vec<f64> = all_oi.iter().map(|o| o.open_interest_value).collect();
+        let oi_values: Vec<f64> = all_oi
+            .iter()
+            .map(|o| o.open_interest.to_f64().unwrap_or(0.0))
+            .collect();
+        let oi_usd: Vec<f64> = all_oi
+            .iter()
+            .map(|o| {
+                o.open_interest_value
+                    .and_then(|v| v.to_f64())
+                    .unwrap_or(0.0)
+            })
+            .collect();
         let (oi_min, oi_max, oi_mean) = stats_f64(&oi_values);
         let (usd_min, usd_max, usd_mean) = stats_f64(&oi_usd);
 

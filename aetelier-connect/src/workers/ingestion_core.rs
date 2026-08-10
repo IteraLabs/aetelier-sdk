@@ -175,6 +175,10 @@ impl IngestionCore {
         &self.common.datatypes
     }
 
+    pub fn environment(&self) -> aetelier_types::exchanges::VenueEnvironment {
+        self.common.environment
+    }
+
     /// The raw TOML `[reconnect]` section, when the config carried one.
     /// Raw (not the resolved [`ConnectionManagerConfig`]) so the framework
     /// path can apply its own defaults to unset fields.
