@@ -192,4 +192,20 @@ mod tests {
             fname_raw
         );
     }
+
+    #[test]
+    fn test_zero_venue_timestamps_stamp_from_local_receipt_never_epoch() {
+        let dir = tempdir().unwrap();
+        let mut rates = make_funding_rates("hyperliquid");
+        for r in &mut rates {
+            r.funding_rate_ts_us = 0;
+        }
+        let path = write_funding_parquet_timestamped(&rates, dir.path(), "sync").unwrap();
+        let fname = path.file_name().unwrap().to_str().unwrap();
+        assert!(
+            fname.starts_with("hyperliquid_BTC-USDT_funding_sync_20221229"),
+            "expected the local-receipt date, got: {fname}"
+        );
+        assert!(!fname.contains("_19700101"));
+    }
 }

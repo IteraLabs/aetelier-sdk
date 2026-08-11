@@ -165,7 +165,11 @@ pub fn write_funding_settlement_parquet_timestamped(
     output_dir: &Path,
     mode: &str,
 ) -> Result<std::path::PathBuf, PersistError> {
-    let file_ts = chrono::Utc::now().format("%Y%m%d_%H%M%S%.3f");
+    let file_ts = crate::naming::batch_stamp(
+        settlements
+            .iter()
+            .map(|r| crate::naming::effective_us(r.funding_time_us, r.local_ts_us)),
+    );
     let raw_symbol = settlements
         .first()
         .map(|r| r.pair.to_canonical())
@@ -179,7 +183,7 @@ pub fn write_funding_settlement_parquet_timestamped(
         "{}_{}_funding_settlement_{}_{}.parquet",
         exchange, symbol, mode, file_ts
     );
-    let path = output_dir.join(filename);
+    let path = crate::naming::unique_path(output_dir, &filename);
     write_funding_settlement_parquet(settlements, &path)?;
     Ok(path)
 }

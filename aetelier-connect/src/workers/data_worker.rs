@@ -757,7 +757,21 @@ impl DataWorker {
                 }
             }
 
-            let _ = adapter_handle.await;
+            let adapter_exit = adapter_handle
+                .await
+                .unwrap_or(crate::framework::registry::TaskExit::Completed);
+            if matches!(
+                adapter_exit,
+                crate::framework::registry::TaskExit::Exhausted
+            ) {
+                metrics.mark_source_exhausted();
+                tracing::info!(
+                    exchange = exchange_name.as_str(),
+                    symbol = symbol.as_str(),
+                    "data_worker.source_exhausted"
+                );
+                break;
+            }
             if stopped || *shutdown.borrow() {
                 break;
             }

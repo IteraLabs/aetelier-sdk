@@ -188,7 +188,10 @@ pub fn write_oi_parquet_timestamped(
     output_dir: &Path,
     mode: &str,
 ) -> Result<std::path::PathBuf, PersistError> {
-    let file_ts = chrono::Utc::now().format("%Y%m%d_%H%M%S%.3f");
+    let file_ts =
+        crate::naming::batch_stamp(records.iter().map(|r| {
+            crate::naming::effective_us(r.open_interest_ts_us, r.local_oi_ts_us)
+        }));
     let raw_symbol = records
         .first()
         .map(|r| r.pair.to_canonical())
@@ -199,7 +202,7 @@ pub fn write_oi_parquet_timestamped(
         .unwrap_or("unknown");
     let symbol = raw_symbol.replace('/', "-");
     let filename = format!("{}_{}_oi_{}_{}.parquet", exchange, symbol, mode, file_ts);
-    let path = output_dir.join(filename);
+    let path = crate::naming::unique_path(output_dir, &filename);
     write_oi_parquet(records, &path)?;
     Ok(path)
 }

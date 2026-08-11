@@ -38,6 +38,7 @@ pub(crate) mod parquet_err {
 }
 
 /// Orderbook I/O (Parquet, CSV, JSON, terminal)
+pub(crate) mod naming;
 pub mod orderbooks;
 
 /// Trade I/O (Parquet)

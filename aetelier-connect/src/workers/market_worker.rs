@@ -1318,6 +1318,15 @@ impl MarketWorker {
             });
             let outcome = runtime_handle.await.unwrap_or(RuntimeOutcome::Finished);
 
+            if matches!(adapter_exit, TaskExit::Exhausted) {
+                metrics.mark_source_exhausted();
+                tracing::info!(
+                    exchange = exchange_name.as_str(),
+                    symbol = symbol.as_str(),
+                    "market_worker.source_exhausted"
+                );
+                break;
+            }
             if stopped || *shutdown.borrow() {
                 drain_partial = matches!(adapter_exit, TaskExit::DrainTimedOut);
                 break;
@@ -1349,7 +1358,7 @@ impl MarketWorker {
             }
             let policy_reason = match adapter_exit {
                 TaskExit::Failed(reason) => reason,
-                TaskExit::Completed | TaskExit::DrainTimedOut => {
+                TaskExit::Completed | TaskExit::DrainTimedOut | TaskExit::Exhausted => {
                     crate::clients::disconnect::DisconnectReason::CleanClose
                 }
             };
@@ -1434,6 +1443,31 @@ impl MarketWorker {
         flushes += 1;
         if let Ok(mut fs) = feeds.lock() {
             fs.mark_all_closed(drain_partial);
+        }
+
+        connection_state = crate::ConnectionState::Disconnected;
+        if let Some(ref tx) = status_tx {
+            let id_str = tx.borrow().id;
+            let _ = tx.send(WorkerStatus {
+                id: id_str,
+                exchange: exchange_enum,
+                pair: pair.clone(),
+                market_type: initial_market_type,
+                mode: WorkerMode::Clock {
+                    clock: clock_mode,
+                    period_us,
+                },
+                connection_state,
+                messages_per_sec: 0.0,
+                total_events,
+                reconnect_count: reconnects,
+                sinks: initial_sinks.clone(),
+                datatypes: initial_datatypes.clone(),
+                feeds: feeds.lock().map(|f| f.snapshot()).unwrap_or_default(),
+                uptime_secs: start.elapsed().as_secs_f64(),
+                ws_latency_us: Some(latency_us_ewma),
+                source_metrics: metrics.snapshot(),
+            });
         }
 
         let m = metrics.snapshot();
