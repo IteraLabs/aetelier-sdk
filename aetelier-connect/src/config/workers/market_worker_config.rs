@@ -19,6 +19,24 @@ use aetelier_types::exchanges::{MarketType, VenueEnvironment};
 
 use crate::errors::ConnectError;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TransportKind {
+    #[default]
+    Wss,
+    Entrepot,
+}
+
+/// `[collect.entrepot]` — the object-store replay window. `root` is a local
+/// directory tree in the bucket's key layout; the S3-backed source arrives
+/// once the archive line format is probe-verified (S0).
+#[derive(Debug, Clone, Deserialize)]
+pub struct EntrepotSection {
+    pub root: std::path::PathBuf,
+    pub start: chrono::NaiveDate,
+    pub end: chrono::NaiveDate,
+}
+
 // ──────────────────────────────────────────────────────────────────────────────────────
 // SyncSection
 // ──────────────────────────────────────────────────────────────────────────────────────
@@ -101,6 +119,10 @@ pub struct MarketWorkerConfig {
     /// Live-reconciliation settings (`None` = feature off).
     pub reconcile: Option<ReconcileSection>,
     pub emission_delay: Option<UpdateFrequency>,
+    /// Source transport: live WSS (default) or finite object-store replay.
+    pub transport: TransportKind,
+    /// Replay window; required when `transport = "entrepot"`.
+    pub entrepot: Option<EntrepotSection>,
 }
 
 impl MarketWorkerConfig {
@@ -118,6 +140,8 @@ impl MarketWorkerConfig {
             framework_ingest: false,
             reconcile: None,
             emission_delay: None,
+            transport: TransportKind::default(),
+            entrepot: None,
         }
     }
 }
@@ -216,6 +240,12 @@ pub struct MarketWorkerCollect {
     /// Default `false` so every existing manifest stays on the legacy path.
     #[serde(default)]
     pub framework_ingest: bool,
+    /// Source transport for every worker; `entrepot` forces the framework
+    /// path and requires `[collect.entrepot]`.
+    #[serde(default)]
+    pub transport: TransportKind,
+    #[serde(default)]
+    pub entrepot: Option<EntrepotSection>,
 }
 
 /// A single worker entry in a [`MarketWorkerManifest`].
@@ -306,6 +336,8 @@ impl MarketWorkerManifest {
             framework_ingest: entry.framework_ingest.unwrap_or(d.framework_ingest),
             reconcile: d.reconcile.clone(),
             emission_delay: d.emission_delay.clone(),
+            transport: d.transport,
+            entrepot: d.entrepot.clone(),
         }
     }
 }
@@ -313,6 +345,61 @@ impl MarketWorkerManifest {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn transport_defaults_to_wss_and_entrepot_parses_its_window() {
+        let base = r#"
+[collect]
+exchange = "hyperliquid"
+{extra}
+
+[collect.datatypes.orderbook]
+enabled = true
+depth = 20
+
+[collect.sync]
+sync_mode = "on_orderbook"
+flush_threshold = 600
+
+[collect.sync.update_frequency]
+value = 100
+unit = "Millis"
+
+[[workers]]
+symbol = "BTC"
+"#;
+        let default_cfg = MarketWorkerManifest::from_str(&base.replace("{extra}", ""))
+            .unwrap()
+            .resolve_all()
+            .remove(0);
+        assert_eq!(default_cfg.transport, TransportKind::Wss);
+        assert!(default_cfg.entrepot.is_none());
+
+        let entrepot_cfg = MarketWorkerManifest::from_str(&base.replace(
+            "{extra}",
+            r#"transport = "entrepot"
+
+[collect.entrepot]
+root = "/data/hl-archive"
+start = "2023-09-16"
+end = "2023-09-17"
+"#,
+        ))
+        .unwrap()
+        .resolve_all()
+        .remove(0);
+        assert_eq!(entrepot_cfg.transport, TransportKind::Entrepot);
+        let section = entrepot_cfg.entrepot.unwrap();
+        assert_eq!(section.root, std::path::PathBuf::from("/data/hl-archive"));
+        assert_eq!(
+            section.start,
+            chrono::NaiveDate::from_ymd_opt(2023, 9, 16).unwrap()
+        );
+        assert_eq!(
+            section.end,
+            chrono::NaiveDate::from_ymd_opt(2023, 9, 17).unwrap()
+        );
+    }
 
     #[test]
     fn environment_parses_testnet_and_defaults_production() {
