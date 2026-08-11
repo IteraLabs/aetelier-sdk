@@ -23,6 +23,7 @@ dependencies = [
 name = "aetelier-connect"
 version = "0.1.0"
 dependencies = [
+ "aetelier-entrepot",
  "aetelier-io",
  "aetelier-telemetry",
  "aetelier-types",

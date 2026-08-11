@@ -21,6 +21,7 @@ pub mod atlas;
 pub mod budget;
 pub mod checksum;
 pub mod driver;
+pub mod entrepot;
 pub mod feed;
 pub mod model;
 pub mod protocol;
