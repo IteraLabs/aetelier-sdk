@@ -1,7 +1,7 @@
 //! Tests for Coinbase market_trades WebSocket response parsing
 //! and live WSS streaming.
 
-#![allow(deprecated)] // exercises the deprecated legacy raw-ingestion path (still live for derivatives/BYO)
+#![allow(deprecated)]
 
 #[cfg(test)]
 mod tests {

@@ -1,4 +1,4 @@
-#![allow(deprecated)] // exercises the deprecated legacy WssClient (still live for derivatives/BYO)
+#![allow(deprecated)]
 
 #[cfg(test)]
 mod tests {

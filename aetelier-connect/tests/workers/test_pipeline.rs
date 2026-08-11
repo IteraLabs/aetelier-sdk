@@ -6,7 +6,7 @@
 //! - Trade passthrough during buffering phase
 //! - Stale delta discarding after snapshot
 
-#![allow(deprecated)] // exercises the deprecated legacy raw-ingestion path (still live for derivatives/BYO)
+#![allow(deprecated)]
 
 #[cfg(test)]
 mod tests {
