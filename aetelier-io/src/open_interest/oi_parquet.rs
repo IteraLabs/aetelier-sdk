@@ -200,7 +200,7 @@ pub fn write_oi_parquet_timestamped(
         .first()
         .map(|r| r.exchange.as_str())
         .unwrap_or("unknown");
-    let symbol = raw_symbol.replace('/', "-");
+    let symbol = raw_symbol.replace('/', "-").replace(':', "_");
     let filename = format!("{}_{}_oi_{}_{}.parquet", exchange, symbol, mode, file_ts);
     let path = crate::naming::unique_path(output_dir, &filename);
     write_oi_parquet(records, &path)?;

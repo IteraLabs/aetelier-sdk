@@ -274,7 +274,7 @@ pub fn write_trades_parquet_timestamped(
         .map(|t| t.exchange.as_str())
         .unwrap_or("unknown");
 
-    let symbol = raw_symbol.replace('/', "-");
+    let symbol = raw_symbol.replace('/', "-").replace(':', "_");
 
     let filename = format!(
         "{}_{}_trades_{}_{}.parquet",

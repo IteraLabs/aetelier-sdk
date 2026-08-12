@@ -220,7 +220,7 @@ pub fn write_liquidations_parquet_timestamped(
         .first()
         .map(|l| l.exchange.as_str())
         .unwrap_or("unknown");
-    let symbol = raw_symbol.replace('/', "-");
+    let symbol = raw_symbol.replace('/', "-").replace(':', "_");
 
     let filename = format!(
         "{}_{}_liquidations_{}_{}.parquet",

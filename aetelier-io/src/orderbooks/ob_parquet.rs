@@ -594,7 +594,11 @@ pub fn write_ob_parquet(
         .map(|ob| ob.bids.len() + ob.asks.len())
         .sum();
 
-    let file_symbol = snapshots[0].pair.to_canonical().replace('/', "-");
+    let file_symbol = snapshots[0]
+        .pair
+        .to_canonical()
+        .replace('/', "-")
+        .replace(':', "_");
     let file_exchange = snapshots[0].exchange.clone();
 
     let mut timestamps = Vec::with_capacity(total_rows);
