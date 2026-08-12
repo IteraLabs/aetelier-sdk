@@ -17,6 +17,8 @@ pub enum EntrepotError {
     },
     #[error("decode {key}: {reason}")]
     Decode { key: String, reason: String },
+    #[error("integrity {key}: {reason}")]
+    Integrity { key: String, reason: String },
     #[error("retries exhausted after {attempts} attempts for {key}: {last}")]
     Exhausted {
         attempts: u32,

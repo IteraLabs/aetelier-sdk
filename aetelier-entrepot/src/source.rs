@@ -12,10 +12,43 @@ pub struct ObjectMeta {
     pub last_modified: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FetchedObject {
+    pub bytes: Vec<u8>,
+    pub etag: Option<String>,
+    pub request_charged: bool,
+}
+
+impl FetchedObject {
+    pub fn from_bytes(bytes: Vec<u8>) -> Self {
+        Self {
+            bytes,
+            etag: None,
+            request_charged: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TransferSnapshot {
+    pub get_requests: u64,
+    pub list_requests: u64,
+    pub retries: u64,
+    pub bytes_in: u64,
+    pub unpaid_responses: u64,
+    pub integrity_fail: u64,
+}
+
 #[async_trait]
 pub trait ObjectSource: Send + Sync {
     async fn list(&self, prefix: &str) -> Result<Vec<ObjectMeta>, EntrepotError>;
     async fn get(&self, key: &str) -> Result<Vec<u8>, EntrepotError>;
+    async fn get_object(&self, key: &str) -> Result<FetchedObject, EntrepotError> {
+        Ok(FetchedObject::from_bytes(self.get(key).await?))
+    }
+    fn transfer_snapshot(&self) -> Option<TransferSnapshot> {
+        None
+    }
 }
 
 pub struct LocalDirSource {

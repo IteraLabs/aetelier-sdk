@@ -778,20 +778,69 @@ impl MarketWorker {
                             "transport = \"entrepot\" requires a [collect.entrepot] section"
                         )
                     })?;
+                    use crate::config::workers::market_worker_config::EntrepotSourceKind;
                     let source: std::sync::Arc<dyn aetelier_entrepot::ObjectSource> =
-                        std::sync::Arc::new(aetelier_entrepot::LocalDirSource::new(
-                            section.root.clone(),
-                        ));
+                        match section.source {
+                            EntrepotSourceKind::Local => {
+                                let root = section.root.clone().ok_or_else(|| {
+                                    anyhow::anyhow!(
+                                        "[collect.entrepot] source = \"local\" requires root"
+                                    )
+                                })?;
+                                std::sync::Arc::new(
+                                    aetelier_entrepot::LocalDirSource::new(root),
+                                )
+                            }
+                            EntrepotSourceKind::S3 => {
+                                let bucket =
+                                    section.bucket.as_deref().ok_or_else(|| {
+                                        anyhow::anyhow!(
+                                            "[collect.entrepot] source = \"s3\" requires bucket"
+                                        )
+                                    })?;
+                                let region =
+                                    section.region.as_deref().ok_or_else(|| {
+                                        anyhow::anyhow!(
+                                            "[collect.entrepot] source = \"s3\" requires region"
+                                        )
+                                    })?;
+                                let cfg = if section.anonymous {
+                                    aetelier_entrepot::S3Config::anonymous(
+                                        bucket,
+                                        region,
+                                        section.endpoint.clone(),
+                                    )
+                                } else {
+                                    let mut cfg =
+                                        aetelier_entrepot::S3Config::from_env(
+                                            bucket, region,
+                                        )
+                                        .map_err(|e| anyhow::anyhow!("{e}"))?;
+                                    cfg.endpoint = section.endpoint.clone();
+                                    cfg.requester_pays =
+                                        section.requester_pays.unwrap_or(true);
+                                    cfg
+                                };
+                                std::sync::Arc::new(aetelier_entrepot::S3Client::new(
+                                    cfg,
+                                ))
+                            }
+                        };
                     let window = crate::framework::entrepot::EntrepotWindow {
                         start: section.start,
                         end: section.end,
                         coins: vec![symbol.clone()],
+                    };
+                    let opts = crate::framework::entrepot::EntrepotOptions {
+                        fetch_concurrency: section.fetch_concurrency.unwrap_or(1),
+                        cursor: section.cursor.clone(),
                     };
                     Some(
                         crate::framework::entrepot::build_entrepot_adapter(
                             exchange_name.as_str(),
                             source,
                             &window,
+                            &opts,
                         )
                         .ok_or_else(|| {
                             anyhow::anyhow!(

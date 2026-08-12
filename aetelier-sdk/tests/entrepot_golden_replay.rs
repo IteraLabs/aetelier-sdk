@@ -7,24 +7,14 @@ use tokio::sync::watch;
 
 fn stage_fixture_hour(root: &std::path::Path) -> usize {
     let fixture = format!(
-        "{}/../aetelier-connect/datasets/hyperliquid/btc_book_trade.jsonl",
+        "{}/../aetelier-connect/datasets/hyperliquid-archive/btc_20260801_h9.jsonl.lz4",
         env!("CARGO_MANIFEST_DIR")
     );
-    let lines: Vec<String> = std::fs::read_to_string(fixture)
-        .unwrap()
-        .lines()
-        .take(400)
-        .map(str::to_string)
-        .collect();
-    let key = root.join("market_data/20260805/12/l2Book/BTC.lz4");
+    let bytes = std::fs::read(fixture).unwrap();
+    let key = root.join("market_data/20260801/9/l2Book/BTC.lz4");
     std::fs::create_dir_all(key.parent().unwrap()).unwrap();
-    let payload = lines.join("\n");
-    std::fs::write(
-        &key,
-        aetelier_entrepot::codec::encode_lz4(payload.as_bytes()),
-    )
-    .unwrap();
-    lines.len()
+    std::fs::write(&key, &bytes).unwrap();
+    bytes.len()
 }
 
 fn parquet_files(dir: &std::path::Path) -> Vec<String> {
@@ -55,8 +45,8 @@ framework_ingest = true
 
 [collect.entrepot]
 root = "{root}"
-start = "2026-08-05"
-end = "2026-08-05"
+start = "2026-08-01"
+end = "2026-08-01"
 
 [collect.datatypes.orderbook]
 enabled = true
@@ -107,17 +97,14 @@ symbol = "BTC"
     assert!(!ob_files.is_empty(), "orderbook parquet written");
     for name in &ob_files {
         assert!(
-            name.starts_with("hyperliquid_BTC-USDC_ob_sync_20260805"),
+            name.starts_with("hyperliquid_BTC-USDC_ob_sync_20260801"),
             "filename stamps from the data's own day, got: {name}"
         );
     }
 
     let trade_files = parquet_files(&out.path().join("trades"));
-    assert!(!trade_files.is_empty(), "trade parquet written");
-    for name in &trade_files {
-        assert!(
-            name.starts_with("hyperliquid_BTC-USDC_trades_sync_20260805"),
-            "filename stamps from the data's own day, got: {name}"
-        );
-    }
+    assert!(
+        trade_files.is_empty(),
+        "market_data carries l2Book only; trades arrive with the node-data bucket (S6)"
+    );
 }

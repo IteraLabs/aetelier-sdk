@@ -35,6 +35,7 @@ dependencies = [
  "crc32fast",
  "flate2",
  "futures-util",
+ "lz4_flex 0.11.6",
  "opentelemetry",
  "rand 0.9.4",
  "reqwest",
@@ -61,6 +62,7 @@ dependencies = [
  "hex",
  "hmac",
  "lz4_flex 0.11.6",
+ "md-5",
  "quick-xml",
  "rand 0.9.4",
  "reqwest",
@@ -103,6 +105,7 @@ dependencies = [
  "aetelier-telemetry",
  "aetelier-types",
  "anyhow",
+ "chrono",
  "clap",
  "rust_decimal",
  "serde",
@@ -1810,6 +1813,16 @@ checksum = "a06de3016e9fae57a36fd14dba131fccf49f74b40b7fbdb472f96e361ec71a08"
 dependencies = [
  "autocfg",
  "rawpointer",
+]
+
+[[package]]
+name = "md-5"
+version = "0.10.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d89e7ee0cfbedfc4da3340218492196241d89eefb6dab27de5df917a6d2e78cf"
+dependencies = [
+ "cfg-if",
+ "digest 0.10.7",
 ]
 
 [[package]]

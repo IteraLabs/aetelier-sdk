@@ -22,6 +22,7 @@ chrono = { version = "0.4" }
 hex = { version = "0.4" }
 hmac = { version = "0.12" }
 lz4_flex = { version = "0.11", default-features = false, features = ["frame", "std"] }
+md-5 = { version = "0.10" }
 quick-xml = { version = "0.37" }
 rand = { workspace = true }
 reqwest = { workspace = true }

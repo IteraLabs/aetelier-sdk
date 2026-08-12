@@ -27,14 +27,33 @@ pub enum TransportKind {
     Entrepot,
 }
 
-/// `[collect.entrepot]` — the object-store replay window. `root` is a local
-/// directory tree in the bucket's key layout; the S3-backed source arrives
-/// once the archive line format is probe-verified (S0).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum EntrepotSourceKind {
+    #[default]
+    Local,
+    S3,
+}
+
+/// `[collect.entrepot]` — the object-store replay window. `source = "local"`
+/// reads `root`, a directory tree in the bucket's key layout; `source = "s3"`
+/// reads the live bucket (`bucket` + `region`, credentials from the
+/// environment unless `anonymous`).
 #[derive(Debug, Clone, Deserialize)]
 pub struct EntrepotSection {
-    pub root: std::path::PathBuf,
+    #[serde(default)]
+    pub source: EntrepotSourceKind,
+    pub root: Option<std::path::PathBuf>,
     pub start: chrono::NaiveDate,
     pub end: chrono::NaiveDate,
+    pub bucket: Option<String>,
+    pub region: Option<String>,
+    pub requester_pays: Option<bool>,
+    #[serde(default)]
+    pub anonymous: bool,
+    pub endpoint: Option<String>,
+    pub cursor: Option<std::path::PathBuf>,
+    pub fetch_concurrency: Option<usize>,
 }
 
 // ──────────────────────────────────────────────────────────────────────────────────────
@@ -390,7 +409,11 @@ end = "2023-09-17"
         .remove(0);
         assert_eq!(entrepot_cfg.transport, TransportKind::Entrepot);
         let section = entrepot_cfg.entrepot.unwrap();
-        assert_eq!(section.root, std::path::PathBuf::from("/data/hl-archive"));
+        assert_eq!(section.source, EntrepotSourceKind::Local);
+        assert_eq!(
+            section.root,
+            Some(std::path::PathBuf::from("/data/hl-archive"))
+        );
         assert_eq!(
             section.start,
             chrono::NaiveDate::from_ymd_opt(2023, 9, 16).unwrap()
@@ -398,6 +421,65 @@ end = "2023-09-17"
         assert_eq!(
             section.end,
             chrono::NaiveDate::from_ymd_opt(2023, 9, 17).unwrap()
+        );
+        assert!(!section.anonymous);
+        assert_eq!(section.cursor, None);
+        assert_eq!(section.fetch_concurrency, None);
+
+        let s3_cfg = MarketWorkerManifest::from_str(&base.replace(
+            "{extra}",
+            r#"transport = "entrepot"
+
+[collect.entrepot]
+source = "s3"
+bucket = "hyperliquid-archive"
+region = "us-east-1"
+requester_pays = true
+start = "2023-09-16"
+end = "2023-09-17"
+cursor = "/var/lib/aetelier/entrepot/btc.cursor"
+fetch_concurrency = 4
+"#,
+        ))
+        .unwrap()
+        .resolve_all()
+        .remove(0);
+        let section = s3_cfg.entrepot.unwrap();
+        assert_eq!(section.source, EntrepotSourceKind::S3);
+        assert_eq!(section.bucket.as_deref(), Some("hyperliquid-archive"));
+        assert_eq!(section.region.as_deref(), Some("us-east-1"));
+        assert_eq!(section.requester_pays, Some(true));
+        assert_eq!(section.root, None);
+        assert_eq!(
+            section.cursor,
+            Some(std::path::PathBuf::from(
+                "/var/lib/aetelier/entrepot/btc.cursor"
+            ))
+        );
+        assert_eq!(section.fetch_concurrency, Some(4));
+
+        let anon_cfg = MarketWorkerManifest::from_str(&base.replace(
+            "{extra}",
+            r#"transport = "entrepot"
+
+[collect.entrepot]
+source = "s3"
+bucket = "public-mirror"
+region = "eu-west-1"
+anonymous = true
+endpoint = "https://s3-eu-west-1.amazonaws.com/public-mirror"
+start = "2023-09-16"
+end = "2023-09-16"
+"#,
+        ))
+        .unwrap()
+        .resolve_all()
+        .remove(0);
+        let section = anon_cfg.entrepot.unwrap();
+        assert!(section.anonymous);
+        assert_eq!(
+            section.endpoint.as_deref(),
+            Some("https://s3-eu-west-1.amazonaws.com/public-mirror")
         );
     }
 
