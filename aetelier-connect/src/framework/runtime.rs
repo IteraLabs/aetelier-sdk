@@ -79,6 +79,8 @@ const SEED_RETRY_CAP: Duration = Duration::from_secs(2);
 const IN_BAND_SEED_DEADLINE: Duration = Duration::from_secs(10);
 const SEED_DEADLINE_TICK: Duration = Duration::from_secs(1);
 
+const HEARTBEAT_TICK: Duration = Duration::from_secs(60);
+
 /// Routing mode for a pair's incoming book deltas. This is NOT the book's
 /// truth — sync state lives in `OrderBookState` on the book itself.
 enum Phase {
@@ -300,6 +302,8 @@ impl SourceRuntime {
         let awaits_in_band_seed = self.seeds_out_of_band && !self.needs_rest;
         let mut seed_deadline = tokio::time::interval(SEED_DEADLINE_TICK);
         seed_deadline.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut heartbeat = tokio::time::interval(HEARTBEAT_TICK);
+        heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             if events_done && in_flight == 0 {
                 break;
@@ -311,6 +315,20 @@ impl SourceRuntime {
                     if *shutdown.borrow() {
                         break;
                     }
+                }
+
+                _ = heartbeat.tick() => {
+                    let s = self.metrics.snapshot();
+                    tracing::info!(
+                        exchange = %self.exchange,
+                        msgs = s.msgs,
+                        reconnects = s.reconnects,
+                        gaps = s.gaps,
+                        resyncs = s.resyncs,
+                        decode_err = s.decode_err,
+                        trade_gaps = s.trade_gaps,
+                        "framework.heartbeat"
+                    );
                 }
 
                 maybe = events.recv(), if !events_done => match maybe {

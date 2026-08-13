@@ -741,3 +741,60 @@ fn hold_back_lands_a_late_trade_in_its_own_true_row() {
     stamps.sort_unstable();
     assert_eq!(stamps, vec![10_400_000, 10_450_000]);
 }
+
+#[test]
+fn test_backfilled_settlement_persists_despite_past_funding_time() {
+    use aetelier_types::funding::FundingSettlement;
+    use rust_decimal::Decimal;
+
+    let mut sync = MarketSynchronizer::trade_driven(PERIOD_1S);
+    let now = 1_700_000_000 * PERIOD_1S;
+    sync.on_trade(make_trade(now, 100.0, 1.0));
+
+    let fs = FundingSettlement {
+        funding_time_us: now - 24 * 3_600 * 1_000_000,
+        local_ts_us: now + 100,
+        rtt_us: 5_000,
+        pair: btcusdt(),
+        funding_rate: Decimal::new(1, 4),
+        premium: None,
+        exchange: "hyperliquid".to_string(),
+    };
+    sync.on_funding_settlement(fs);
+
+    sync.on_trade(make_trade(now + 2 * PERIOD_1S, 101.0, 1.0));
+    let snaps = sync.drain();
+    let landed: usize = snaps.iter().map(|s| s.funding_settlements.len()).sum();
+    assert_eq!(landed, 1, "venue-time-keyed settlement must ride the arrival-clock row");
+    assert_eq!(sync.late_events_dropped, 0, "settlement must never count as late");
+}
+
+#[test]
+fn test_settlement_arriving_ahead_of_grid_stays_buffered_then_lands() {
+    use aetelier_types::funding::FundingSettlement;
+    use rust_decimal::Decimal;
+
+    let mut sync = MarketSynchronizer::trade_driven(PERIOD_1S);
+    let now = 1_700_000_000 * PERIOD_1S;
+    sync.on_trade(make_trade(now, 100.0, 1.0));
+
+    let fs = FundingSettlement {
+        funding_time_us: now - 3_600 * 1_000_000,
+        local_ts_us: now + 10 * PERIOD_1S,
+        rtt_us: 1_000,
+        pair: btcusdt(),
+        funding_rate: Decimal::new(-2, 4),
+        premium: None,
+        exchange: "hyperliquid".to_string(),
+    };
+    sync.on_funding_settlement(fs);
+
+    sync.on_trade(make_trade(now + PERIOD_1S, 100.5, 1.0));
+    let early: usize = sync.drain().iter().map(|s| s.funding_settlements.len()).sum();
+    assert_eq!(early, 0, "future-arrival settlement stays buffered");
+
+    sync.on_trade(make_trade(now + 12 * PERIOD_1S, 101.0, 1.0));
+    let landed: usize = sync.drain().iter().map(|s| s.funding_settlements.len()).sum();
+    assert_eq!(landed, 1);
+    assert_eq!(sync.late_events_dropped, 0);
+}

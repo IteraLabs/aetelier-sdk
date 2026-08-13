@@ -320,10 +320,8 @@ impl MarketSynchronizer {
             }
         }
         for fs in std::mem::take(&mut self.current_funding_settlements) {
-            let row = fs.funding_time_us / self.period_us + 1;
-            if row <= prev_period {
-                late += 1;
-            } else if row <= last_emitted {
+            let row = (fs.local_ts_us / self.period_us + 1).max(prev_period + 1);
+            if row <= last_emitted {
                 out.entry(row).or_default().funding_settlements.push(fs);
             } else {
                 self.current_funding_settlements.push(fs);
