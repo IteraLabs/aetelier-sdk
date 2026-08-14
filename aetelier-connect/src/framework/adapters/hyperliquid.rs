@@ -353,9 +353,9 @@ const HYPERLIQUID_TESTNET_INFO_URL: &str = "https://api.hyperliquid-testnet.xyz/
 
 const SETTLEMENT_FETCH_DELAY_SECS: u64 = 5;
 
-const SETTLEMENT_BACKFILL_MS: u64 = 24 * 3600 * 1000;
+const SETTLEMENT_BACKFILL_MS: u64 = 3600 * 1000;
 
-const SETTLEMENT_OVERLAP_MS: u64 = 2 * 3600 * 1000;
+const SETTLEMENT_OVERLAP_MS: u64 = 3600 * 1000;
 
 fn now_us() -> u64 {
     std::time::SystemTime::now()
@@ -381,14 +381,26 @@ async fn settlement_poller(
         }
     };
     let mut start_ms = (now_us() / 1_000).saturating_sub(SETTLEMENT_BACKFILL_MS);
+    tracing::info!(
+        symbols = %symbols.join(","),
+        start_ms,
+        interval_ms = 3_600_000u64,
+        "hyperliquid.settlement.window — covers one interval from operational start; \
+         context downtime is not recovered here"
+    );
     loop {
+        let cycle_hour_ms = (now_us() / 1_000 / 3_600_000) * 3_600_000;
         for symbol in &symbols {
             let mut attempts = 0;
+            let mut sent: Option<usize> = None;
             while attempts < 2 {
                 attempts += 1;
                 match fetch_settlements(&client, environment, symbol, start_ms, &tx).await
                 {
-                    Ok(()) => break,
+                    Ok(n) => {
+                        sent = Some(n);
+                        break;
+                    }
                     Err(e) => {
                         tracing::warn!(
                             symbol = %symbol,
@@ -399,6 +411,20 @@ async fn settlement_poller(
                         tokio::time::sleep(Duration::from_secs(30)).await;
                     }
                 }
+            }
+            match sent {
+                Some(n) => tracing::info!(
+                    symbol = %symbol,
+                    hour_ms = cycle_hour_ms,
+                    rows = n,
+                    "hyperliquid.settlement.cycle"
+                ),
+                None => tracing::warn!(
+                    symbol = %symbol,
+                    hour_ms = cycle_hour_ms,
+                    "hyperliquid.settlement.gap — this hour was not collected; \
+                     recover with an explicit backfill unit"
+                ),
             }
         }
         start_ms = (now_us() / 1_000).saturating_sub(SETTLEMENT_OVERLAP_MS);
@@ -423,7 +449,7 @@ async fn fetch_settlements(
     symbol: &str,
     start_ms: u64,
     tx: &mpsc::Sender<DomainEvent>,
-) -> Result<(), String> {
+) -> Result<usize, String> {
     use crate::sources::hyperliquid::responses::HyperliquidFundingHistoryRow;
     let body = serde_json::json!({
         "type": "fundingHistory",
@@ -445,6 +471,7 @@ async fn fetch_settlements(
         resp.json().await.map_err(|e| e.to_string())?;
     let rtt_us = sent_at.elapsed().as_micros() as u64;
     let local_ts_us = now_us();
+    let mut sent = 0usize;
     for row in rows {
         let Some(pair) = HYPERLIQUID_CODEC.decode(&row.coin) else {
             continue;
@@ -471,10 +498,11 @@ async fn fetch_settlements(
             exchange: "hyperliquid".to_string(),
         };
         if tx.send(DomainEvent::FundingSettlement(fs)).await.is_err() {
-            return Ok(());
+            return Ok(sent);
         }
+        sent += 1;
     }
-    Ok(())
+    Ok(sent)
 }
 
 static HYPERLIQUID_PROFILE: LazyLock<ExchangeProfile> =
