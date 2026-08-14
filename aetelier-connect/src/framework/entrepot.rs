@@ -11,6 +11,64 @@ use tokio::task::JoinHandle;
 use aetelier_entrepot::EntrepotError;
 use aetelier_entrepot::codec;
 use aetelier_entrepot::source::ObjectSource;
+use aetelier_entrepot::{LocalDirSource, S3Client};
+use async_trait::async_trait;
+
+pub struct ArchiveObject {
+    pub bytes: Vec<u8>,
+    pub etag: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ArchiveReceipt {
+    pub get_requests: u64,
+    pub list_requests: u64,
+    pub retries: u64,
+    pub bytes_in: u64,
+    pub unpaid_responses: u64,
+    pub integrity_fail: u64,
+}
+
+#[async_trait]
+pub trait ArchiveSource: ObjectSource {
+    async fn fetch(&self, key: &str) -> Result<ArchiveObject, EntrepotError>;
+    fn receipt(&self) -> Option<ArchiveReceipt>;
+}
+
+#[async_trait]
+impl ArchiveSource for S3Client {
+    async fn fetch(&self, key: &str) -> Result<ArchiveObject, EntrepotError> {
+        self.get_object(key).await.map(|f| ArchiveObject {
+            bytes: f.bytes,
+            etag: f.etag,
+        })
+    }
+
+    fn receipt(&self) -> Option<ArchiveReceipt> {
+        self.transfer_snapshot().map(|s| ArchiveReceipt {
+            get_requests: s.get_requests,
+            list_requests: s.list_requests,
+            retries: s.retries,
+            bytes_in: s.bytes_in,
+            unpaid_responses: s.unpaid_responses,
+            integrity_fail: s.integrity_fail,
+        })
+    }
+}
+
+#[async_trait]
+impl ArchiveSource for LocalDirSource {
+    async fn fetch(&self, key: &str) -> Result<ArchiveObject, EntrepotError> {
+        self.get(key).await.map(|bytes| ArchiveObject {
+            bytes,
+            etag: None,
+        })
+    }
+
+    fn receipt(&self) -> Option<ArchiveReceipt> {
+        None
+    }
+}
 
 use super::budget::{ConnectionBudget, SourceMetrics};
 use super::model::{DomainEvent, ReconstructionModel};
@@ -143,7 +201,7 @@ fn parse_l2book_key(key: &str) -> Option<(u32, String)> {
 }
 
 pub async fn discover_coins(
-    source: &dyn ObjectSource,
+    source: &dyn ArchiveSource,
     date: NaiveDate,
 ) -> Result<Vec<String>, EntrepotError> {
     let day = date.format("%Y%m%d");
@@ -193,7 +251,7 @@ pub fn planned_keys(window: &EntrepotWindow, want_ctx: bool) -> Vec<String> {
 }
 
 async fn enumerate_window(
-    source: &dyn ObjectSource,
+    source: &dyn ArchiveSource,
     window: &EntrepotWindow,
     want_ctx: bool,
 ) -> Result<WindowPlan, EntrepotError> {
@@ -244,7 +302,7 @@ async fn enumerate_window(
 const EDGE_PROBE_CAP: u32 = 45;
 
 async fn probe_edge(
-    source: &dyn ObjectSource,
+    source: &dyn ArchiveSource,
     window: &EntrepotWindow,
 ) -> Option<NaiveDate> {
     let mut date = window.end;
@@ -343,8 +401,8 @@ where
     }
 }
 
-fn log_transfer_summary(source: &dyn ObjectSource) {
-    if let Some(s) = source.transfer_snapshot() {
+fn log_transfer_summary(source: &dyn ArchiveSource) {
+    if let Some(s) = source.receipt() {
         tracing::info!(
             get_requests = s.get_requests,
             list_requests = s.list_requests,
@@ -461,7 +519,7 @@ async fn emit_ctx_rows(
 }
 
 pub struct HyperliquidEntrepotAdapter {
-    source: Arc<dyn ObjectSource>,
+    source: Arc<dyn ArchiveSource>,
     window: EntrepotWindow,
     decoder: Arc<dyn LineDecoder>,
     fetch_concurrency: usize,
@@ -469,7 +527,7 @@ pub struct HyperliquidEntrepotAdapter {
 }
 
 impl HyperliquidEntrepotAdapter {
-    pub fn new(source: Arc<dyn ObjectSource>, window: &EntrepotWindow) -> Self {
+    pub fn new(source: Arc<dyn ArchiveSource>, window: &EntrepotWindow) -> Self {
         Self {
             source,
             window: window.clone(),
@@ -503,7 +561,7 @@ pub struct EntrepotOptions {
 
 pub fn build_entrepot_adapter(
     venue: &str,
-    source: Arc<dyn ObjectSource>,
+    source: Arc<dyn ArchiveSource>,
     window: &EntrepotWindow,
     opts: &EntrepotOptions,
 ) -> Option<Box<dyn ExchangeAdapter>> {
@@ -592,13 +650,12 @@ impl ExchangeAdapter for HyperliquidEntrepotAdapter {
             let mut fetches = futures_util::stream::iter(tail.into_iter().map(|key| {
                 let src = Arc::clone(&source);
                 async move {
-                    let res = src.get_object(&key).await;
+                    let res = src.fetch(&key).await;
                     (key, res)
                 }
             }))
             .buffered(concurrency);
             let mut recv_seq: u64 = 0;
-            let mut ver_drift_warned = false;
             let exit = loop {
                 let Some((key, res)) = fetches.next().await else {
                     break TaskExit::Exhausted;
@@ -697,6 +754,8 @@ impl ExchangeAdapter for HyperliquidEntrepotAdapter {
                     }
                 } else {
                     let mut closed = false;
+                    let mut ver_rejected_lines: u64 = 0;
+                    let mut ver_found: u64 = 0;
                     for line in &lines {
                         match decoder.decode_line(line) {
                             Ok(decoded) => {
@@ -713,21 +772,8 @@ impl ExchangeAdapter for HyperliquidEntrepotAdapter {
                             }
                             Err(LineReject::UnsupportedVersion { found }) => {
                                 metrics.bump_ver_rejected();
-                                if !ver_drift_warned {
-                                    ver_drift_warned = true;
-                                    tracing::warn!(
-                                        key = key.as_str(),
-                                        found,
-                                        expected = ARCHIVE_LINE_VERSION,
-                                        "entrepot.ver_num_drift"
-                                    );
-                                } else {
-                                    tracing::debug!(
-                                        key = key.as_str(),
-                                        found,
-                                        "entrepot.ver_rejected"
-                                    );
-                                }
+                                ver_rejected_lines += 1;
+                                ver_found = found;
                             }
                             Err(LineReject::Undecodable(e)) => {
                                 tracing::warn!(key = key.as_str(), error = %e, "entrepot.line_undecodable");
@@ -737,6 +783,15 @@ impl ExchangeAdapter for HyperliquidEntrepotAdapter {
                         if closed {
                             break;
                         }
+                    }
+                    if ver_rejected_lines > 0 {
+                        tracing::warn!(
+                            key = key.as_str(),
+                            lines = ver_rejected_lines,
+                            found = ver_found,
+                            expected = ARCHIVE_LINE_VERSION,
+                            "entrepot.ver_num_drift"
+                        );
                     }
                     if closed {
                         break TaskExit::Completed;
@@ -1031,7 +1086,7 @@ mod tests {
             &fixture_bytes(BTC_FIXTURE),
         );
 
-        let source: Arc<dyn ObjectSource> =
+        let source: Arc<dyn ArchiveSource> =
             Arc::new(aetelier_entrepot::LocalDirSource::new(dir.path()));
         let coins = discover_coins(
             source.as_ref(),
@@ -1110,7 +1165,7 @@ mod tests {
                 &fixture_bytes(SOL_FIXTURE),
             );
         }
-        let source: Arc<dyn ObjectSource> =
+        let source: Arc<dyn ArchiveSource> =
             Arc::new(aetelier_entrepot::LocalDirSource::new(dir.path()));
 
         let sequential = HyperliquidEntrepotAdapter::new(
@@ -1160,7 +1215,7 @@ mod tests {
         );
         let cursor_dir = tempfile::tempdir().unwrap();
         let cursor = cursor_dir.path().join("sol.cursor");
-        let source: Arc<dyn ObjectSource> =
+        let source: Arc<dyn ArchiveSource> =
             Arc::new(aetelier_entrepot::LocalDirSource::new(dir.path()));
 
         let first = HyperliquidEntrepotAdapter::new(
@@ -1210,7 +1265,7 @@ mod tests {
             "asset_ctxs/20230916.csv.lz4",
             &fixture_bytes(CTX_FIXTURE),
         );
-        let source: Arc<dyn ObjectSource> =
+        let source: Arc<dyn ArchiveSource> =
             Arc::new(aetelier_entrepot::LocalDirSource::new(dir.path()));
         let adapter = HyperliquidEntrepotAdapter::new(
             Arc::clone(&source),
@@ -1273,7 +1328,7 @@ mod tests {
             "asset_ctxs/20230916.csv.lz4",
             &fixture_bytes(CTX_FIXTURE),
         );
-        let source: Arc<dyn ObjectSource> =
+        let source: Arc<dyn ArchiveSource> =
             Arc::new(aetelier_entrepot::LocalDirSource::new(dir.path()));
         let adapter = HyperliquidEntrepotAdapter::new(
             Arc::clone(&source),
@@ -1294,7 +1349,7 @@ mod tests {
             "2023-09-16T00:00:00Z,AAVE,-0.00001822,479.75,1".to_string(),
         ]);
         stage_bytes(dir.path(), "asset_ctxs/20230916.csv.lz4", &drifted);
-        let source: Arc<dyn ObjectSource> =
+        let source: Arc<dyn ArchiveSource> =
             Arc::new(aetelier_entrepot::LocalDirSource::new(dir.path()));
         let adapter = HyperliquidEntrepotAdapter::new(
             Arc::clone(&source),
@@ -1322,7 +1377,7 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         stage_bytes(dir.path(), "market_data/20230916/9/l2Book/SOL.lz4", &staged);
-        let source: Arc<dyn ObjectSource> =
+        let source: Arc<dyn ArchiveSource> =
             Arc::new(aetelier_entrepot::LocalDirSource::new(dir.path()));
         let adapter = HyperliquidEntrepotAdapter::new(
             Arc::clone(&source),
@@ -1359,6 +1414,17 @@ mod tests {
         }
     }
 
+    #[async_trait]
+    impl ArchiveSource for FatalSource {
+        async fn fetch(&self, key: &str) -> Result<ArchiveObject, EntrepotError> {
+            self.get(key).await.map(|bytes| ArchiveObject { bytes, etag: None })
+        }
+
+        fn receipt(&self) -> Option<ArchiveReceipt> {
+            None
+        }
+    }
+
     struct ExhaustedSource;
 
     #[async_trait]
@@ -1376,6 +1442,17 @@ mod tests {
                 key: key.to_string(),
                 last: "http 503".to_string(),
             })
+        }
+    }
+
+    #[async_trait]
+    impl ArchiveSource for ExhaustedSource {
+        async fn fetch(&self, key: &str) -> Result<ArchiveObject, EntrepotError> {
+            self.get(key).await.map(|bytes| ArchiveObject { bytes, etag: None })
+        }
+
+        fn receipt(&self) -> Option<ArchiveReceipt> {
+            None
         }
     }
 
@@ -1438,15 +1515,19 @@ mod tests {
             Ok(self.bytes.clone())
         }
 
-        async fn get_object(
-            &self,
-            _key: &str,
-        ) -> Result<aetelier_entrepot::FetchedObject, EntrepotError> {
-            Ok(aetelier_entrepot::FetchedObject {
+    }
+
+    #[async_trait]
+    impl ArchiveSource for RepublishedSource {
+        async fn fetch(&self, _key: &str) -> Result<ArchiveObject, EntrepotError> {
+            Ok(ArchiveObject {
                 bytes: self.bytes.clone(),
                 etag: Some("etag-after-republication".to_string()),
-                request_charged: false,
             })
+        }
+
+        fn receipt(&self) -> Option<ArchiveReceipt> {
+            None
         }
     }
 
@@ -1470,7 +1551,7 @@ mod tests {
     #[test]
     fn profile_pins_full_refresh_reconstruction() {
         let dir = tempfile::tempdir().unwrap();
-        let source: Arc<dyn ObjectSource> =
+        let source: Arc<dyn ArchiveSource> =
             Arc::new(aetelier_entrepot::LocalDirSource::new(dir.path()));
         let adapter =
             HyperliquidEntrepotAdapter::new(source, &window(&["BTC"], 2026, 8, 5));
@@ -1487,7 +1568,7 @@ mod tests {
     #[test]
     fn factory_knows_hyperliquid_and_nothing_else() {
         let dir = tempfile::tempdir().unwrap();
-        let source: Arc<dyn ObjectSource> =
+        let source: Arc<dyn ArchiveSource> =
             Arc::new(aetelier_entrepot::LocalDirSource::new(dir.path()));
         let opts = EntrepotOptions {
             fetch_concurrency: 4,

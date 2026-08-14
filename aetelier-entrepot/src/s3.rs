@@ -11,7 +11,34 @@ use crate::retry::{
     RetryPolicy, Verdict, classify_status, is_retryable_transport, parse_retry_after,
 };
 use crate::sign::{Credentials, EMPTY_PAYLOAD_SHA256, sign};
-use crate::source::{FetchedObject, ObjectMeta, ObjectSource, TransferSnapshot};
+use crate::source::{ObjectMeta, ObjectSource};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FetchedObject {
+    pub bytes: Vec<u8>,
+    pub etag: Option<String>,
+    pub request_charged: bool,
+}
+
+impl FetchedObject {
+    pub fn from_bytes(bytes: Vec<u8>) -> Self {
+        Self {
+            bytes,
+            etag: None,
+            request_charged: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TransferSnapshot {
+    pub get_requests: u64,
+    pub list_requests: u64,
+    pub retries: u64,
+    pub bytes_in: u64,
+    pub unpaid_responses: u64,
+    pub integrity_fail: u64,
+}
 
 #[derive(Debug, Clone)]
 pub struct S3Config {
@@ -453,8 +480,10 @@ impl ObjectSource for S3Client {
     async fn get(&self, key: &str) -> Result<Vec<u8>, EntrepotError> {
         self.get_object(key).await.map(|f| f.bytes)
     }
+}
 
-    async fn get_object(&self, key: &str) -> Result<FetchedObject, EntrepotError> {
+impl S3Client {
+    pub async fn get_object(&self, key: &str) -> Result<FetchedObject, EntrepotError> {
         let path = format!("/{key}");
         let (bytes, meta) = self
             .get_with_retry(RequestKind::Get, key, &path, &[])
@@ -473,7 +502,7 @@ impl ObjectSource for S3Client {
         })
     }
 
-    fn transfer_snapshot(&self) -> Option<TransferSnapshot> {
+    pub fn transfer_snapshot(&self) -> Option<TransferSnapshot> {
         Some(self.stats())
     }
 }
@@ -786,6 +815,10 @@ mod tests {
             verify_integrity("k", body, Some("multipart-etag-0000-3"), Some(12))
                 .is_ok()
         );
+        let foreign = md5_hex(b"other bytes entirely");
+        let aws_multipart = format!("{foreign}-2");
+        assert!(verify_integrity("k", body, Some(&aws_multipart), Some(12)).is_ok());
+        assert!(verify_integrity("k", body, Some(&aws_multipart), Some(13)).is_err());
         assert!(verify_integrity("k", body, None, None).is_ok());
     }
 

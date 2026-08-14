@@ -779,7 +779,7 @@ impl MarketWorker {
                         )
                     })?;
                     use crate::config::workers::market_worker_config::EntrepotSourceKind;
-                    let source: std::sync::Arc<dyn aetelier_entrepot::ObjectSource> =
+                    let source: std::sync::Arc<dyn crate::framework::entrepot::ArchiveSource> =
                         match section.source {
                             EntrepotSourceKind::Local => {
                                 let root = section.root.clone().ok_or_else(|| {

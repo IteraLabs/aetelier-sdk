@@ -8,7 +8,7 @@ pub mod sign;
 pub mod source;
 
 pub use error::EntrepotError;
-pub use s3::{S3Client, S3Config, TransferStats, verify_integrity};
-pub use source::{
-    FetchedObject, LocalDirSource, ObjectMeta, ObjectSource, TransferSnapshot,
+pub use s3::{
+    FetchedObject, S3Client, S3Config, TransferSnapshot, TransferStats, verify_integrity,
 };
+pub use source::{LocalDirSource, ObjectMeta, ObjectSource};
