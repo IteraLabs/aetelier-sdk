@@ -765,8 +765,14 @@ fn test_backfilled_settlement_persists_despite_past_funding_time() {
     sync.on_trade(make_trade(now + 2 * PERIOD_1S, 101.0, 1.0));
     let snaps = sync.drain();
     let landed: usize = snaps.iter().map(|s| s.funding_settlements.len()).sum();
-    assert_eq!(landed, 1, "venue-time-keyed settlement must ride the arrival-clock row");
-    assert_eq!(sync.late_events_dropped, 0, "settlement must never count as late");
+    assert_eq!(
+        landed, 1,
+        "venue-time-keyed settlement must ride the arrival-clock row"
+    );
+    assert_eq!(
+        sync.late_events_dropped, 0,
+        "settlement must never count as late"
+    );
 }
 
 #[test]
@@ -790,11 +796,19 @@ fn test_settlement_arriving_ahead_of_grid_stays_buffered_then_lands() {
     sync.on_funding_settlement(fs);
 
     sync.on_trade(make_trade(now + PERIOD_1S, 100.5, 1.0));
-    let early: usize = sync.drain().iter().map(|s| s.funding_settlements.len()).sum();
+    let early: usize = sync
+        .drain()
+        .iter()
+        .map(|s| s.funding_settlements.len())
+        .sum();
     assert_eq!(early, 0, "future-arrival settlement stays buffered");
 
     sync.on_trade(make_trade(now + 12 * PERIOD_1S, 101.0, 1.0));
-    let landed: usize = sync.drain().iter().map(|s| s.funding_settlements.len()).sum();
+    let landed: usize = sync
+        .drain()
+        .iter()
+        .map(|s| s.funding_settlements.len())
+        .sum();
     assert_eq!(landed, 1);
     assert_eq!(sync.late_events_dropped, 0);
 }
