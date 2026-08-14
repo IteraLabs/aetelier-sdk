@@ -38,15 +38,24 @@ enum Command {
         start: NaiveDate,
         #[arg(long)]
         end: NaiveDate,
-        #[arg(long, help = "Include asset_ctxs daily objects (FundingRates + OpenInterest)")]
+        #[arg(
+            long,
+            help = "Include asset_ctxs daily objects (FundingRates + OpenInterest)"
+        )]
         ctx: bool,
         #[arg(long, default_value = "hyperliquid-archive")]
         bucket: String,
         #[arg(long, default_value = "us-east-1")]
         region: String,
-        #[arg(long, help = "LIST the bucket (paid, receipted) for coverage edge + universe; needs AWS creds in env")]
+        #[arg(
+            long,
+            help = "LIST the bucket (paid, receipted) for coverage edge + universe; needs AWS creds in env"
+        )]
         live: bool,
-        #[arg(long, help = "Filter the --live universe names by case-insensitive substring")]
+        #[arg(
+            long,
+            help = "Filter the --live universe names by case-insensitive substring"
+        )]
         find: Option<String>,
     },
     #[command(about = "Emit a validated md_worker manifest for the window")]
@@ -57,11 +66,17 @@ enum Command {
         start: NaiveDate,
         #[arg(long)]
         end: NaiveDate,
-        #[arg(long, help = "Include asset_ctxs daily objects (FundingRates + OpenInterest)")]
+        #[arg(
+            long,
+            help = "Include asset_ctxs daily objects (FundingRates + OpenInterest)"
+        )]
         ctx: bool,
         #[arg(long, help = "Parquet output directory the worker writes into")]
         out: PathBuf,
-        #[arg(long, help = "Manifest file path; defaults to entrepot-<coin>-<start>-<end>.toml")]
+        #[arg(
+            long,
+            help = "Manifest file path; defaults to entrepot-<coin>-<start>-<end>.toml"
+        )]
         manifest_out: Option<PathBuf>,
         #[arg(long, default_value = "hyperliquid-archive")]
         bucket: String,
@@ -73,11 +88,17 @@ enum Command {
         cursor: Option<PathBuf>,
         #[arg(long, default_value_t = 1)]
         concurrency: usize,
-        #[arg(long, help = "Anonymous access: public buckets, no credentials, no requester-pays")]
+        #[arg(
+            long,
+            help = "Anonymous access: public buckets, no credentials, no requester-pays"
+        )]
         anonymous: bool,
         #[arg(long)]
         endpoint: Option<String>,
-        #[arg(long, help = "Stop the run after this many hours (fractional ok, e.g. 0.33 = 20 min); emits [session]")]
+        #[arg(
+            long,
+            help = "Stop the run after this many hours (fractional ok, e.g. 0.33 = 20 min); emits [session]"
+        )]
         duration_hours: Option<f64>,
     },
     #[command(about = "Report cursor position against the manifest's planned window")]
@@ -85,7 +106,9 @@ enum Command {
         #[arg(long)]
         manifest: PathBuf,
     },
-    #[command(about = "Raw LIST of a bucket prefix: distinct directories or keys (paid, receipted)")]
+    #[command(
+        about = "Raw LIST of a bucket prefix: distinct directories or keys (paid, receipted)"
+    )]
     List {
         #[arg(long)]
         prefix: String,
@@ -93,11 +116,17 @@ enum Command {
         bucket: String,
         #[arg(long, default_value = "us-east-1")]
         region: String,
-        #[arg(long, help = "Print distinct parent directories with object counts instead of keys")]
+        #[arg(
+            long,
+            help = "Print distinct parent directories with object counts instead of keys"
+        )]
         dirs: bool,
         #[arg(long, default_value_t = 200)]
         limit: usize,
-        #[arg(long, help = "Single delimited LIST page: prints CommonPrefixes (e.g. / for top-level dirs); one request, no pagination")]
+        #[arg(
+            long,
+            help = "Single delimited LIST page: prints CommonPrefixes (e.g. / for top-level dirs); one request, no pagination"
+        )]
         delimiter: Option<String>,
     },
 }
@@ -150,7 +179,10 @@ async fn run_plan(
     let egress_min = s.min_bytes as f64 / 1e9 * EGRESS_PER_GB_INTERNET;
     let egress_max = s.max_bytes as f64 / 1e9 * EGRESS_PER_GB_INTERNET;
 
-    println!("window            {start} .. {end}  ({} days)", (end - start).num_days() + 1);
+    println!(
+        "window            {start} .. {end}  ({} days)",
+        (end - start).num_days() + 1
+    );
     println!("coin              {coin}");
     println!("bucket            s3://{bucket}  ({region}, requester-pays)");
     println!("l2Book objects    {}", s.l2book_objects);
@@ -191,7 +223,10 @@ async fn run_plan(
                             .filter(|c| c.to_lowercase().contains(&needle))
                             .collect();
                         if matches.is_empty() {
-                            println!("matches           none for \"{}\"", find.as_deref().unwrap_or_default());
+                            println!(
+                                "matches           none for \"{}\"",
+                                find.as_deref().unwrap_or_default()
+                            );
                         } else {
                             for m in matches {
                                 println!("match             {m}");
@@ -233,9 +268,8 @@ fn render_manifest(
     let source = match root {
         Some(root) => format!("source = \"local\"\nroot = \"{}\"", root.display()),
         None => {
-            let mut s = format!(
-                "source = \"s3\"\nbucket = \"{bucket}\"\nregion = \"{region}\""
-            );
+            let mut s =
+                format!("source = \"s3\"\nbucket = \"{bucket}\"\nregion = \"{region}\"");
             if anonymous {
                 s.push_str("\nanonymous = true");
             } else {
@@ -407,7 +441,9 @@ fn run_status(manifest: PathBuf) -> anyhow::Result<()> {
                     println!("remaining         {} objects", total - done);
                 }
                 None => {
-                    println!("cursor            {last}  (NOT IN PLAN — run restarts from zero)");
+                    println!(
+                        "cursor            {last}  (NOT IN PLAN — run restarts from zero)"
+                    );
                 }
             }
         }

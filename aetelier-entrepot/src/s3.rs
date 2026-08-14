@@ -395,8 +395,10 @@ pub fn parse_list_page(xml: &str) -> Result<ListPage, EntrepotError> {
                 path.pop();
             }
             Event::Text(text) => {
-                let value = text
-                    .unescape()
+                let decoded = text
+                    .decode()
+                    .map_err(|e| EntrepotError::ListParse(e.to_string()))?;
+                let value = quick_xml::escape::unescape(&decoded)
                     .map_err(|e| EntrepotError::ListParse(e.to_string()))?
                     .into_owned();
                 let in_contents = path.len() >= 2 && path[path.len() - 2] == "Contents";
@@ -803,17 +805,11 @@ mod tests {
             Err(EntrepotError::Integrity { .. })
         ));
         assert!(matches!(
-            verify_integrity(
-                "k",
-                body,
-                Some("00000000000000000000000000000000"),
-                None
-            ),
+            verify_integrity("k", body, Some("00000000000000000000000000000000"), None),
             Err(EntrepotError::Integrity { .. })
         ));
         assert!(
-            verify_integrity("k", body, Some("multipart-etag-0000-3"), Some(12))
-                .is_ok()
+            verify_integrity("k", body, Some("multipart-etag-0000-3"), Some(12)).is_ok()
         );
         let foreign = md5_hex(b"other bytes entirely");
         let aws_multipart = format!("{foreign}-2");

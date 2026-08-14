@@ -59,10 +59,9 @@ impl ArchiveSource for S3Client {
 #[async_trait]
 impl ArchiveSource for LocalDirSource {
     async fn fetch(&self, key: &str) -> Result<ArchiveObject, EntrepotError> {
-        self.get(key).await.map(|bytes| ArchiveObject {
-            bytes,
-            etag: None,
-        })
+        self.get(key)
+            .await
+            .map(|bytes| ArchiveObject { bytes, etag: None })
     }
 
     fn receipt(&self) -> Option<ArchiveReceipt> {
@@ -342,7 +341,11 @@ fn resume_index(cursor: Option<&Path>, keys: &[String]) -> usize {
     }
     match keys.iter().position(|k| k == last) {
         Some(pos) => {
-            tracing::info!(cursor = last, resumed_at = pos + 1, "entrepot.cursor_resume");
+            tracing::info!(
+                cursor = last,
+                resumed_at = pos + 1,
+                "entrepot.cursor_resume"
+            );
             pos + 1
         }
         None => {
@@ -361,8 +364,7 @@ fn write_cursor(path: &Path, key: &str) {
         return;
     }
     let part = PathBuf::from(format!("{}.part", path.display()));
-    if let Err(e) =
-        std::fs::write(&part, key).and_then(|_| std::fs::rename(&part, path))
+    if let Err(e) = std::fs::write(&part, key).and_then(|_| std::fs::rename(&part, path))
     {
         tracing::warn!(error = %e, "entrepot.cursor_write_failed");
     }
@@ -620,19 +622,18 @@ impl ExchangeAdapter for HyperliquidEntrepotAdapter {
         tokio::spawn(async move {
             let want_ctx = declared.contains(DeclaredDatatype::FundingRates)
                 || declared.contains(DeclaredDatatype::OpenInterest);
-            let plan =
-                match enumerate_window(source.as_ref(), &window, want_ctx).await {
-                    Ok(plan) => plan,
-                    Err(e) => {
-                        tracing::error!(error = %e, "entrepot.enumerate_failed");
-                        log_transfer_summary(source.as_ref());
-                        return TaskExit::Failed(
-                            crate::clients::disconnect::DisconnectReason::TransportError {
-                                source: e.to_string().into(),
-                            },
-                        );
-                    }
-                };
+            let plan = match enumerate_window(source.as_ref(), &window, want_ctx).await {
+                Ok(plan) => plan,
+                Err(e) => {
+                    tracing::error!(error = %e, "entrepot.enumerate_failed");
+                    log_transfer_summary(source.as_ref());
+                    return TaskExit::Failed(
+                        crate::clients::disconnect::DisconnectReason::TransportError {
+                            source: e.to_string().into(),
+                        },
+                    );
+                }
+            };
             let edge = match plan.observed_edge {
                 Some(date) => Some(date),
                 None if window.coins.is_empty() => None,
@@ -678,10 +679,7 @@ impl ExchangeAdapter for HyperliquidEntrepotAdapter {
                             );
                             metrics.bump_gaps_beyond_edge();
                         } else {
-                            tracing::debug!(
-                                key = key.as_str(),
-                                "entrepot.object_absent"
-                            );
+                            tracing::debug!(key = key.as_str(), "entrepot.object_absent");
                             metrics.bump_gaps();
                         }
                         if let Some(path) = cursor_path.as_deref() {
@@ -729,7 +727,11 @@ impl ExchangeAdapter for HyperliquidEntrepotAdapter {
                 }) {
                     Ok(lines) => lines,
                     Err(reason) => {
-                        tracing::error!(key = key.as_str(), reason, "entrepot.decode_failed");
+                        tracing::error!(
+                            key = key.as_str(),
+                            reason,
+                            "entrepot.decode_failed"
+                        );
                         metrics.bump_decode_err();
                         if let Some(path) = cursor_path.as_deref() {
                             write_cursor(path, &key);
@@ -814,8 +816,7 @@ mod tests {
 
     const SOL_FIXTURE: &str = "datasets/hyperliquid-archive/sol_20230916_h9.jsonl.lz4";
     const BTC_FIXTURE: &str = "datasets/hyperliquid-archive/btc_20260801_h9.jsonl.lz4";
-    const CTX_FIXTURE: &str =
-        "datasets/hyperliquid-archive/asset_ctxs_20230916.csv.lz4";
+    const CTX_FIXTURE: &str = "datasets/hyperliquid-archive/asset_ctxs_20230916.csv.lz4";
     const HOUR9_START_US: u64 = 1_694_854_800_000_000;
     const HOUR9_END_US: u64 = 1_694_858_400_000_000;
 
@@ -886,10 +887,7 @@ mod tests {
         w.end = NaiveDate::from_ymd_opt(2026, 8, 6).unwrap();
         assert_eq!(
             hyperliquid_asset_ctxs_keys(&w),
-            [
-                "asset_ctxs/20260805.csv.lz4",
-                "asset_ctxs/20260806.csv.lz4"
-            ]
+            ["asset_ctxs/20260805.csv.lz4", "asset_ctxs/20260806.csv.lz4"]
         );
     }
 
@@ -1036,8 +1034,7 @@ mod tests {
         let adapter =
             HyperliquidEntrepotAdapter::new(source, &window(&["SOL"], 2023, 9, 16));
         let (events, exit, metrics) =
-            run_adapter(&adapter, DeclaredSet::only(DeclaredDatatype::Orderbook))
-                .await;
+            run_adapter(&adapter, DeclaredSet::only(DeclaredDatatype::Orderbook)).await;
 
         assert!(matches!(exit, TaskExit::Exhausted));
         assert_eq!(events.len(), 150);
@@ -1107,8 +1104,7 @@ mod tests {
         w.end = NaiveDate::from_ymd_opt(2023, 9, 17).unwrap();
         let adapter = HyperliquidEntrepotAdapter::new(Arc::clone(&source), &w);
         let (events, exit, metrics) =
-            run_adapter(&adapter, DeclaredSet::only(DeclaredDatatype::Orderbook))
-                .await;
+            run_adapter(&adapter, DeclaredSet::only(DeclaredDatatype::Orderbook)).await;
 
         assert!(matches!(exit, TaskExit::Exhausted));
         assert_eq!(events.len(), 350);
@@ -1142,8 +1138,7 @@ mod tests {
         w.end = NaiveDate::from_ymd_opt(2023, 9, 18).unwrap();
         let adapter = HyperliquidEntrepotAdapter::new(source, &w);
         let (events, exit, metrics) =
-            run_adapter(&adapter, DeclaredSet::only(DeclaredDatatype::Orderbook))
-                .await;
+            run_adapter(&adapter, DeclaredSet::only(DeclaredDatatype::Orderbook)).await;
 
         assert!(matches!(exit, TaskExit::Exhausted));
         assert_eq!(events.len(), 150);
@@ -1250,8 +1245,7 @@ mod tests {
         )
         .with_cursor(Some(cursor.clone()));
         let (events, exit, metrics) =
-            run_adapter(&resumed, DeclaredSet::only(DeclaredDatatype::Orderbook))
-                .await;
+            run_adapter(&resumed, DeclaredSet::only(DeclaredDatatype::Orderbook)).await;
         assert!(matches!(exit, TaskExit::Exhausted));
         assert_eq!(events.len(), 150, "only keys after the cursor replay");
         assert_eq!(metrics.snapshot().gaps, 19);
@@ -1335,8 +1329,7 @@ mod tests {
             &window(&["AAVE"], 2023, 9, 16),
         );
         let (events, exit, _) =
-            run_adapter(&adapter, DeclaredSet::only(DeclaredDatatype::Orderbook))
-                .await;
+            run_adapter(&adapter, DeclaredSet::only(DeclaredDatatype::Orderbook)).await;
         assert!(matches!(exit, TaskExit::Exhausted));
         assert!(events.is_empty());
     }
@@ -1384,8 +1377,7 @@ mod tests {
             &window(&["SOL"], 2023, 9, 16),
         );
         let (events, exit, metrics) =
-            run_adapter(&adapter, DeclaredSet::only(DeclaredDatatype::Orderbook))
-                .await;
+            run_adapter(&adapter, DeclaredSet::only(DeclaredDatatype::Orderbook)).await;
 
         assert!(matches!(exit, TaskExit::Exhausted));
         assert_eq!(events.len(), 2, "v1 lines around the drift still replay");
@@ -1417,7 +1409,9 @@ mod tests {
     #[async_trait]
     impl ArchiveSource for FatalSource {
         async fn fetch(&self, key: &str) -> Result<ArchiveObject, EntrepotError> {
-            self.get(key).await.map(|bytes| ArchiveObject { bytes, etag: None })
+            self.get(key)
+                .await
+                .map(|bytes| ArchiveObject { bytes, etag: None })
         }
 
         fn receipt(&self) -> Option<ArchiveReceipt> {
@@ -1448,7 +1442,9 @@ mod tests {
     #[async_trait]
     impl ArchiveSource for ExhaustedSource {
         async fn fetch(&self, key: &str) -> Result<ArchiveObject, EntrepotError> {
-            self.get(key).await.map(|bytes| ArchiveObject { bytes, etag: None })
+            self.get(key)
+                .await
+                .map(|bytes| ArchiveObject { bytes, etag: None })
         }
 
         fn receipt(&self) -> Option<ArchiveReceipt> {
@@ -1514,7 +1510,6 @@ mod tests {
         async fn get(&self, _key: &str) -> Result<Vec<u8>, EntrepotError> {
             Ok(self.bytes.clone())
         }
-
     }
 
     #[async_trait]
@@ -1541,8 +1536,7 @@ mod tests {
             &window(&[], 2023, 9, 16),
         );
         let (events, exit, metrics) =
-            run_adapter(&adapter, DeclaredSet::only(DeclaredDatatype::Orderbook))
-                .await;
+            run_adapter(&adapter, DeclaredSet::only(DeclaredDatatype::Orderbook)).await;
         assert!(matches!(exit, TaskExit::Exhausted));
         assert_eq!(events.len(), 150);
         assert_eq!(metrics.snapshot().republished, 1);
