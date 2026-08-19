@@ -259,7 +259,10 @@ pub fn write_trades_parquet_timestamped(
     output_dir: &Path,
     mode: &str,
 ) -> Result<std::path::PathBuf, PersistError> {
-    let file_ts = chrono::Utc::now().format("%Y%m%d_%H%M%S%.3f");
+    let file_ts =
+        crate::naming::batch_stamp(trades.iter().map(|t| {
+            crate::naming::effective_us(t.source_trade_ts_us, t.local_trade_ts_us)
+        }));
 
     let raw_symbol = trades
         .first()
@@ -271,13 +274,13 @@ pub fn write_trades_parquet_timestamped(
         .map(|t| t.exchange.as_str())
         .unwrap_or("unknown");
 
-    let symbol = raw_symbol.replace('/', "-");
+    let symbol = raw_symbol.replace('/', "-").replace(':', "_");
 
     let filename = format!(
         "{}_{}_trades_{}_{}.parquet",
         exchange, symbol, mode, file_ts
     );
-    let path = output_dir.join(filename);
+    let path = crate::naming::unique_path(output_dir, &filename);
 
     write_trades_parquet(trades, &path)?;
     Ok(path)

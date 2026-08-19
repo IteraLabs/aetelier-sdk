@@ -172,6 +172,7 @@ name = "timestamp_source_ts"
 path = "tests/timestamp_source_ts.rs"
 
 [dependencies]
+aetelier-entrepot = { path = "../aetelier-entrepot", version = "0.1.0" }
 aetelier-telemetry = { path = "../aetelier-telemetry", version = "0.1.0", optional = true }
 aetelier-types = { path = "../aetelier-types", version = "0.1.0" }
 anyhow = { version = "1.0" }
@@ -202,6 +203,7 @@ uuid = { version = "1.0", features = ["v4"] }
 
 [dev-dependencies]
 aetelier-io = { path = "../aetelier-io", features = ["parquet"] }
+lz4_flex = { version = "0.11", default-features = false, features = ["frame", "std"] }
 aetelier-types = { path = "../aetelier-types", version = "0.1.0" }
 futures-util = "0.3"
 serde_json = { version = "1.0", features = ["raw_value"] }

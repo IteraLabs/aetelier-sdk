@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
   "aetelier-connect",
+  "aetelier-entrepot",
   "aetelier-io",
   "aetelier-sdk",
   "aetelier-telemetry",
@@ -66,3 +67,6 @@ unused_variables = "warn"
 [workspace.lints.clippy]
 large_enum_variant = "allow"
 too_many_arguments = "allow"
+
+[profile.dev.package.twox-hash]
+overflow-checks = false

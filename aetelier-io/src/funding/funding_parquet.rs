@@ -197,7 +197,9 @@ pub fn write_funding_parquet_timestamped(
     output_dir: &Path,
     mode: &str,
 ) -> Result<std::path::PathBuf, PersistError> {
-    let file_ts = chrono::Utc::now().format("%Y%m%d_%H%M%S%.3f");
+    let file_ts = crate::naming::batch_stamp(rates.iter().map(|r| {
+        crate::naming::effective_us(r.funding_rate_ts_us, r.local_funding_ts_us)
+    }));
     let raw_symbol = rates
         .first()
         .map(|r| r.pair.to_canonical())
@@ -206,12 +208,12 @@ pub fn write_funding_parquet_timestamped(
         .first()
         .map(|r| r.exchange.as_str())
         .unwrap_or("unknown");
-    let symbol = raw_symbol.replace('/', "-");
+    let symbol = raw_symbol.replace('/', "-").replace(':', "_");
     let filename = format!(
         "{}_{}_funding_{}_{}.parquet",
         exchange, symbol, mode, file_ts
     );
-    let path = output_dir.join(filename);
+    let path = crate::naming::unique_path(output_dir, &filename);
     write_funding_parquet(rates, &path)?;
     Ok(path)
 }
@@ -225,4 +227,35 @@ pub fn write_funding_parquet_timestamped(
     Err(PersistError::UnsupportedFormat(
         "parquet support not compiled in (enable 'parquet' feature)".to_string(),
     ))
+}
+
+#[cfg(all(test, feature = "parquet"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dex_prefixed_pairs_sanitize_colon_in_filenames_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let rate = aetelier_types::funding::FundingRate {
+            funding_rate_ts_us: 1_786_399_200_000_000,
+            local_funding_ts_us: 1_786_399_200_000_000,
+            recv_seq: 1,
+            conn_epoch: 0,
+            pair: aetelier_types::trading_pair::TradingPair::new("xyz:TSLA", "USDC"),
+            funding_rate: rust_decimal::Decimal::new(-894, 10),
+            premium: None,
+            interval_hours: 1,
+            next_funding_ts_us: 0,
+            exchange: "hyperliquid".to_string(),
+        };
+        let path =
+            write_funding_parquet_timestamped(&[rate], dir.path(), "sync").unwrap();
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        assert!(
+            name.starts_with("hyperliquid_xyz_TSLA-USDC_funding_sync_"),
+            "filename must sanitize ':' to '_', got {name}"
+        );
+        let rows = read_funding_parquet(&path).unwrap();
+        assert_eq!(rows[0].pair.base(), "xyz:TSLA");
+    }
 }

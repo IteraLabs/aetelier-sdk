@@ -19,6 +19,43 @@ use aetelier_types::exchanges::{MarketType, VenueEnvironment};
 
 use crate::errors::ConnectError;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TransportKind {
+    #[default]
+    Wss,
+    Entrepot,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum EntrepotSourceKind {
+    #[default]
+    Local,
+    S3,
+}
+
+/// `[collect.entrepot]` — the object-store replay window. `source = "local"`
+/// reads `root`, a directory tree in the bucket's key layout; `source = "s3"`
+/// reads the live bucket (`bucket` + `region`, credentials from the
+/// environment unless `anonymous`).
+#[derive(Debug, Clone, Deserialize)]
+pub struct EntrepotSection {
+    #[serde(default)]
+    pub source: EntrepotSourceKind,
+    pub root: Option<std::path::PathBuf>,
+    pub start: chrono::NaiveDate,
+    pub end: chrono::NaiveDate,
+    pub bucket: Option<String>,
+    pub region: Option<String>,
+    pub requester_pays: Option<bool>,
+    #[serde(default)]
+    pub anonymous: bool,
+    pub endpoint: Option<String>,
+    pub cursor: Option<std::path::PathBuf>,
+    pub fetch_concurrency: Option<usize>,
+}
+
 // ──────────────────────────────────────────────────────────────────────────────────────
 // SyncSection
 // ──────────────────────────────────────────────────────────────────────────────────────
@@ -101,6 +138,10 @@ pub struct MarketWorkerConfig {
     /// Live-reconciliation settings (`None` = feature off).
     pub reconcile: Option<ReconcileSection>,
     pub emission_delay: Option<UpdateFrequency>,
+    /// Source transport: live WSS (default) or finite object-store replay.
+    pub transport: TransportKind,
+    /// Replay window; required when `transport = "entrepot"`.
+    pub entrepot: Option<EntrepotSection>,
 }
 
 impl MarketWorkerConfig {
@@ -118,6 +159,8 @@ impl MarketWorkerConfig {
             framework_ingest: false,
             reconcile: None,
             emission_delay: None,
+            transport: TransportKind::default(),
+            entrepot: None,
         }
     }
 }
@@ -216,6 +259,12 @@ pub struct MarketWorkerCollect {
     /// Default `false` so every existing manifest stays on the legacy path.
     #[serde(default)]
     pub framework_ingest: bool,
+    /// Source transport for every worker; `entrepot` forces the framework
+    /// path and requires `[collect.entrepot]`.
+    #[serde(default)]
+    pub transport: TransportKind,
+    #[serde(default)]
+    pub entrepot: Option<EntrepotSection>,
 }
 
 /// A single worker entry in a [`MarketWorkerManifest`].
@@ -306,6 +355,8 @@ impl MarketWorkerManifest {
             framework_ingest: entry.framework_ingest.unwrap_or(d.framework_ingest),
             reconcile: d.reconcile.clone(),
             emission_delay: d.emission_delay.clone(),
+            transport: d.transport,
+            entrepot: d.entrepot.clone(),
         }
     }
 }
@@ -313,6 +364,124 @@ impl MarketWorkerManifest {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn transport_defaults_to_wss_and_entrepot_parses_its_window() {
+        let base = r#"
+[collect]
+exchange = "hyperliquid"
+{extra}
+
+[collect.datatypes.orderbook]
+enabled = true
+depth = 20
+
+[collect.sync]
+sync_mode = "on_orderbook"
+flush_threshold = 600
+
+[collect.sync.update_frequency]
+value = 100
+unit = "Millis"
+
+[[workers]]
+symbol = "BTC"
+"#;
+        let default_cfg = MarketWorkerManifest::from_str(&base.replace("{extra}", ""))
+            .unwrap()
+            .resolve_all()
+            .remove(0);
+        assert_eq!(default_cfg.transport, TransportKind::Wss);
+        assert!(default_cfg.entrepot.is_none());
+
+        let entrepot_cfg = MarketWorkerManifest::from_str(&base.replace(
+            "{extra}",
+            r#"transport = "entrepot"
+
+[collect.entrepot]
+root = "/data/hl-archive"
+start = "2023-09-16"
+end = "2023-09-17"
+"#,
+        ))
+        .unwrap()
+        .resolve_all()
+        .remove(0);
+        assert_eq!(entrepot_cfg.transport, TransportKind::Entrepot);
+        let section = entrepot_cfg.entrepot.unwrap();
+        assert_eq!(section.source, EntrepotSourceKind::Local);
+        assert_eq!(
+            section.root,
+            Some(std::path::PathBuf::from("/data/hl-archive"))
+        );
+        assert_eq!(
+            section.start,
+            chrono::NaiveDate::from_ymd_opt(2023, 9, 16).unwrap()
+        );
+        assert_eq!(
+            section.end,
+            chrono::NaiveDate::from_ymd_opt(2023, 9, 17).unwrap()
+        );
+        assert!(!section.anonymous);
+        assert_eq!(section.cursor, None);
+        assert_eq!(section.fetch_concurrency, None);
+
+        let s3_cfg = MarketWorkerManifest::from_str(&base.replace(
+            "{extra}",
+            r#"transport = "entrepot"
+
+[collect.entrepot]
+source = "s3"
+bucket = "hyperliquid-archive"
+region = "us-east-1"
+requester_pays = true
+start = "2023-09-16"
+end = "2023-09-17"
+cursor = "/var/lib/aetelier/entrepot/btc.cursor"
+fetch_concurrency = 4
+"#,
+        ))
+        .unwrap()
+        .resolve_all()
+        .remove(0);
+        let section = s3_cfg.entrepot.unwrap();
+        assert_eq!(section.source, EntrepotSourceKind::S3);
+        assert_eq!(section.bucket.as_deref(), Some("hyperliquid-archive"));
+        assert_eq!(section.region.as_deref(), Some("us-east-1"));
+        assert_eq!(section.requester_pays, Some(true));
+        assert_eq!(section.root, None);
+        assert_eq!(
+            section.cursor,
+            Some(std::path::PathBuf::from(
+                "/var/lib/aetelier/entrepot/btc.cursor"
+            ))
+        );
+        assert_eq!(section.fetch_concurrency, Some(4));
+
+        let anon_cfg = MarketWorkerManifest::from_str(&base.replace(
+            "{extra}",
+            r#"transport = "entrepot"
+
+[collect.entrepot]
+source = "s3"
+bucket = "public-mirror"
+region = "eu-west-1"
+anonymous = true
+endpoint = "https://s3-eu-west-1.amazonaws.com/public-mirror"
+start = "2023-09-16"
+end = "2023-09-16"
+"#,
+        ))
+        .unwrap()
+        .resolve_all()
+        .remove(0);
+        let section = anon_cfg.entrepot.unwrap();
+        assert!(section.anonymous);
+        assert_eq!(
+            section.endpoint.as_deref(),
+            Some("https://s3-eu-west-1.amazonaws.com/public-mirror")
+        );
+    }
 
     #[test]
     fn environment_parses_testnet_and_defaults_production() {

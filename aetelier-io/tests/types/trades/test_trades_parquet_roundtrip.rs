@@ -375,6 +375,43 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_timestamped_filename_stamps_from_the_data_not_the_wall_clock() {
+        let dir = tempdir().unwrap();
+        let mut trades = make_trades("bybit");
+        trades[0].source_trade_ts_us = 1_694_854_805_500_000;
+        trades[1].source_trade_ts_us = 1_694_854_800_000_000;
+        let path = write_trades_parquet_timestamped(&trades, dir.path(), "sync").unwrap();
+        let fname = path.file_name().unwrap().to_str().unwrap();
+        assert_eq!(
+            fname,
+            "bybit_BTC-USDT_trades_sync_20230916_090000.000.parquet"
+        );
+    }
+
+    #[test]
+    fn test_refilling_the_same_period_never_truncates_the_first_file() {
+        let dir = tempdir().unwrap();
+        let mut trades = make_trades("bybit");
+        trades[0].source_trade_ts_us = 1_694_854_805_500_000;
+        trades[1].source_trade_ts_us = 1_694_854_800_000_000;
+        let first =
+            write_trades_parquet_timestamped(&trades, dir.path(), "sync").unwrap();
+        let second =
+            write_trades_parquet_timestamped(&trades, dir.path(), "sync").unwrap();
+        assert_ne!(first, second);
+        assert!(
+            second
+                .file_name()
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .ends_with("-1.parquet")
+        );
+        assert_eq!(read_trades_parquet(&first).unwrap().len(), 2);
+        assert_eq!(read_trades_parquet(&second).unwrap().len(), 2);
+    }
+
     // ── Symbol sanitization (slash → dash) ───────────────────────────────
 
     #[test]

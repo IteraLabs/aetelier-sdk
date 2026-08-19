@@ -88,6 +88,11 @@ struct SourceMetricsInner {
     replay_duplicates: AtomicU64,
     out_of_order_frames: AtomicU64,
     ingest_backpressure: AtomicU64,
+    source_exhausted: AtomicU64,
+    gaps_beyond_edge: AtomicU64,
+    ver_rejected: AtomicU64,
+    integrity_fail: AtomicU64,
+    republished: AtomicU64,
 }
 
 /// Confidence class of the trade-loss accounting on this source, encoded as a
@@ -185,6 +190,18 @@ pub struct SourceMetricsSnapshot {
     pub out_of_order_frames: u64,
     #[serde(default)]
     pub ingest_backpressure: u64,
+    /// 1 when a finite source reported `TaskExit::Exhausted`: everything it
+    /// had was delivered and the worker ended as a terminal success.
+    #[serde(default)]
+    pub source_exhausted: u64,
+    #[serde(default)]
+    pub gaps_beyond_edge: u64,
+    #[serde(default)]
+    pub ver_rejected: u64,
+    #[serde(default)]
+    pub integrity_fail: u64,
+    #[serde(default)]
+    pub republished: u64,
 }
 
 impl SourceMetrics {
@@ -235,6 +252,27 @@ impl SourceMetrics {
     /// A parquet flush batch failed (retained for retry).
     pub fn bump_flush_failures(&self) {
         self.inner.flush_failures.fetch_add(1, Ordering::Relaxed);
+    }
+    /// The source reported `TaskExit::Exhausted` — finite input fully
+    /// delivered; latches to 1 and never resets.
+    pub fn mark_source_exhausted(&self) {
+        self.inner.source_exhausted.store(1, Ordering::Relaxed);
+    }
+
+    pub fn bump_gaps_beyond_edge(&self) {
+        self.inner.gaps_beyond_edge.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn bump_ver_rejected(&self) {
+        self.inner.ver_rejected.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn bump_integrity_fail(&self) {
+        self.inner.integrity_fail.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn bump_republished(&self) {
+        self.inner.republished.fetch_add(1, Ordering::Relaxed);
     }
 
     /// One trade-continuity break was observed on a venue trade sequence.
@@ -348,6 +386,11 @@ impl SourceMetrics {
             replay_duplicates: i.replay_duplicates.load(Ordering::Relaxed),
             out_of_order_frames: i.out_of_order_frames.load(Ordering::Relaxed),
             ingest_backpressure: i.ingest_backpressure.load(Ordering::Relaxed),
+            source_exhausted: i.source_exhausted.load(Ordering::Relaxed),
+            gaps_beyond_edge: i.gaps_beyond_edge.load(Ordering::Relaxed),
+            ver_rejected: i.ver_rejected.load(Ordering::Relaxed),
+            integrity_fail: i.integrity_fail.load(Ordering::Relaxed),
+            republished: i.republished.load(Ordering::Relaxed),
         }
     }
 }

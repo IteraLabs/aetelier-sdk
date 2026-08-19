@@ -151,6 +151,10 @@ pub struct MarketWorker {
     /// the legacy ingestion path (falls back to legacy if the venue is not
     /// registered).
     framework_ingest: bool,
+    /// Source transport (live WSS or finite object-store replay).
+    transport: crate::config::workers::market_worker_config::TransportKind,
+    /// Replay window when `transport = "entrepot"`.
+    entrepot: Option<crate::config::workers::market_worker_config::EntrepotSection>,
     /// Snapshot broadcast handle (`Some` when a Channel sink is configured);
     /// kept so consumers can subscribe to the synchronized stream.
     snapshot_channel: Option<crate::workers::topic_publisher::SnapshotChannel>,
@@ -202,6 +206,17 @@ impl MarketWorker {
         let mut sync = MarketSynchronizer::with_clock_mode(period_us, clock_mode);
         let flush_threshold = config.sync.flush_threshold;
         let framework_ingest = config.framework_ingest;
+        let transport = config.transport;
+        let entrepot = config.entrepot.clone();
+        if transport
+            == crate::config::workers::market_worker_config::TransportKind::Entrepot
+            && entrepot.is_none()
+        {
+            return Err(ConnectError::Build(
+                "transport = \"entrepot\" requires a [collect.entrepot] section"
+                    .to_string(),
+            ));
+        }
 
         // Live reconciliation is gated to the synchronized path at cadence
         // ≥ 50ms (below that the hold-back buffers too many periods to be
@@ -309,6 +324,8 @@ impl MarketWorker {
             cmd_rx: None,
             status_tx: None,
             framework_ingest,
+            transport,
+            entrepot,
             snapshot_channel,
             gap_ledger,
             reconcile,
@@ -375,6 +392,11 @@ impl MarketWorker {
         self,
         shutdown: watch::Receiver<bool>,
     ) -> anyhow::Result<MarketWorkerReport> {
+        if self.transport
+            == crate::config::workers::market_worker_config::TransportKind::Entrepot
+        {
+            return self.run_framework(shutdown).await;
+        }
         if self.framework_ingest
             && let Some(adapter) = crate::framework::registry::registry()
                 .get(self.exchange_name.as_str())
@@ -432,6 +454,8 @@ impl MarketWorker {
             cmd_rx,
             status_tx,
             framework_ingest: _,
+            transport: _,
+            entrepot: _,
             snapshot_channel: _,
             gap_ledger: _,
             reconcile: _,
@@ -734,6 +758,8 @@ impl MarketWorker {
             status_tx,
             gap_ledger,
             reconcile,
+            transport,
+            entrepot,
             ..
         } = self;
 
@@ -742,14 +768,95 @@ impl MarketWorker {
         // unset, so keep the full book.
         let config_depth = (ob_depth != 0).then_some(ob_depth);
 
-        let adapter = crate::framework::registry::registry()
-            .get(exchange_name.as_str())
-            .copied()
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "run_framework entered for unregistered venue '{exchange_name}'"
-                )
-            })?;
+        use crate::config::workers::market_worker_config::TransportKind;
+        let owned_adapter: Option<Box<dyn crate::framework::registry::ExchangeAdapter>> =
+            match transport {
+                TransportKind::Wss => None,
+                TransportKind::Entrepot => {
+                    let section = entrepot.as_ref().ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "transport = \"entrepot\" requires a [collect.entrepot] section"
+                        )
+                    })?;
+                    use crate::config::workers::market_worker_config::EntrepotSourceKind;
+                    let source: std::sync::Arc<
+                        dyn crate::framework::entrepot::ArchiveSource,
+                    > = match section.source {
+                        EntrepotSourceKind::Local => {
+                            let root = section.root.clone().ok_or_else(|| {
+                                anyhow::anyhow!(
+                                    "[collect.entrepot] source = \"local\" requires root"
+                                )
+                            })?;
+                            std::sync::Arc::new(aetelier_entrepot::LocalDirSource::new(
+                                root,
+                            ))
+                        }
+                        EntrepotSourceKind::S3 => {
+                            let bucket = section.bucket.as_deref().ok_or_else(|| {
+                                anyhow::anyhow!(
+                                    "[collect.entrepot] source = \"s3\" requires bucket"
+                                )
+                            })?;
+                            let region = section.region.as_deref().ok_or_else(|| {
+                                anyhow::anyhow!(
+                                    "[collect.entrepot] source = \"s3\" requires region"
+                                )
+                            })?;
+                            let cfg = if section.anonymous {
+                                aetelier_entrepot::S3Config::anonymous(
+                                    bucket,
+                                    region,
+                                    section.endpoint.clone(),
+                                )
+                            } else {
+                                let mut cfg =
+                                    aetelier_entrepot::S3Config::from_env(bucket, region)
+                                        .map_err(|e| anyhow::anyhow!("{e}"))?;
+                                cfg.endpoint = section.endpoint.clone();
+                                cfg.requester_pays =
+                                    section.requester_pays.unwrap_or(true);
+                                cfg
+                            };
+                            std::sync::Arc::new(aetelier_entrepot::S3Client::new(cfg))
+                        }
+                    };
+                    let window = crate::framework::entrepot::EntrepotWindow {
+                        start: section.start,
+                        end: section.end,
+                        coins: vec![symbol.clone()],
+                    };
+                    let opts = crate::framework::entrepot::EntrepotOptions {
+                        fetch_concurrency: section.fetch_concurrency.unwrap_or(1),
+                        cursor: section.cursor.clone(),
+                    };
+                    Some(
+                        crate::framework::entrepot::build_entrepot_adapter(
+                            exchange_name.as_str(),
+                            source,
+                            &window,
+                            &opts,
+                        )
+                        .ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "no entrepot adapter exists for venue '{exchange_name}'"
+                            )
+                        })?,
+                    )
+                }
+            };
+        let adapter: &dyn crate::framework::registry::ExchangeAdapter =
+            match owned_adapter.as_deref() {
+                Some(a) => a,
+                None => crate::framework::registry::registry()
+                    .get(exchange_name.as_str())
+                    .copied()
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "run_framework entered for unregistered venue '{exchange_name}'"
+                        )
+                    })?,
+            };
 
         if let Err(e) = crate::framework::registry::admit_declared_depth(
             &exchange_name,
@@ -1318,6 +1425,15 @@ impl MarketWorker {
             });
             let outcome = runtime_handle.await.unwrap_or(RuntimeOutcome::Finished);
 
+            if matches!(adapter_exit, TaskExit::Exhausted) {
+                metrics.mark_source_exhausted();
+                tracing::info!(
+                    exchange = exchange_name.as_str(),
+                    symbol = symbol.as_str(),
+                    "market_worker.source_exhausted"
+                );
+                break;
+            }
             if stopped || *shutdown.borrow() {
                 drain_partial = matches!(adapter_exit, TaskExit::DrainTimedOut);
                 break;
@@ -1349,7 +1465,7 @@ impl MarketWorker {
             }
             let policy_reason = match adapter_exit {
                 TaskExit::Failed(reason) => reason,
-                TaskExit::Completed | TaskExit::DrainTimedOut => {
+                TaskExit::Completed | TaskExit::DrainTimedOut | TaskExit::Exhausted => {
                     crate::clients::disconnect::DisconnectReason::CleanClose
                 }
             };
@@ -1434,6 +1550,31 @@ impl MarketWorker {
         flushes += 1;
         if let Ok(mut fs) = feeds.lock() {
             fs.mark_all_closed(drain_partial);
+        }
+
+        connection_state = crate::ConnectionState::Disconnected;
+        if let Some(ref tx) = status_tx {
+            let id_str = tx.borrow().id;
+            let _ = tx.send(WorkerStatus {
+                id: id_str,
+                exchange: exchange_enum,
+                pair: pair.clone(),
+                market_type: initial_market_type,
+                mode: WorkerMode::Clock {
+                    clock: clock_mode,
+                    period_us,
+                },
+                connection_state,
+                messages_per_sec: 0.0,
+                total_events,
+                reconnect_count: reconnects,
+                sinks: initial_sinks.clone(),
+                datatypes: initial_datatypes.clone(),
+                feeds: feeds.lock().map(|f| f.snapshot()).unwrap_or_default(),
+                uptime_secs: start.elapsed().as_secs_f64(),
+                ws_latency_us: Some(latency_us_ewma),
+                source_metrics: metrics.snapshot(),
+            });
         }
 
         let m = metrics.snapshot();

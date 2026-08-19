@@ -1,0 +1,48 @@
+[collect]
+exchange = "hyperliquid"
+market_type = "perpetual"
+transport = "entrepot"
+framework_ingest = true
+
+[collect.entrepot]
+source = "s3"
+bucket = "hyperliquid-archive"
+region = "us-east-1"
+requester_pays = true
+start = "2026-07-01"
+end = "2026-07-02"
+cursor = "./datasets/entrepot-test-btc/BTC.cursor"
+fetch_concurrency = 1
+
+[collect.reconnect]
+initial_delay_ms = 1000
+max_delay_ms = 5000
+max_attempts = 3
+
+[collect.datatypes.orderbook]
+enabled = true
+depth = 20
+
+[collect.datatypes.funding_rates]
+enabled = true
+
+[collect.datatypes.open_interest]
+enabled = true
+
+[collect.sync]
+sync_mode = "on_orderbook"
+flush_threshold = 600
+
+[collect.sync.update_frequency]
+value = 500
+unit = "Millis"
+
+[[collect.output]]
+type = "parquet"
+dir = "./datasets/entrepot-test-btc"
+
+[[workers]]
+symbol = "BTC"
+
+[session]
+duration_hours = 0.33

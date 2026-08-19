@@ -58,7 +58,18 @@ impl SymbolCodec {
             // No separator → suffix-match the known-quote table.
             SymbolCodec::Concat { .. } => return TradingPair::from_concatenated(&up),
             SymbolCodec::BareCoin { quote } => {
-                if up.is_empty() || up.contains([':', '@', '/', '-', '_']) {
+                let bare = raw.trim();
+                if let Some((dex, ticker)) = bare.split_once(':') {
+                    if dex.is_empty()
+                        || ticker.is_empty()
+                        || !dex.chars().all(|c| c.is_ascii_alphanumeric())
+                        || !ticker.chars().all(|c| c.is_ascii_alphanumeric())
+                    {
+                        return None;
+                    }
+                    return Some(TradingPair::new(bare, *quote));
+                }
+                if up.is_empty() || up.contains(['@', '/', '-', '_']) {
                     return None;
                 }
                 (up.as_str(), *quote)
@@ -123,19 +134,39 @@ mod tests {
     }
 
     #[test]
-    fn bare_coin_maps_to_fixed_quote_and_rejects_non_default_dex() {
+    fn bare_coin_maps_to_fixed_quote_and_rejects_spot_forms() {
         let codec = SymbolCodec::BareCoin { quote: "USDC" };
         assert_eq!(codec.decode("BTC"), Some(TradingPair::new("BTC", "USDC")));
         assert_eq!(codec.encode(&TradingPair::new("BTC", "USDC")), "BTC");
         for raw in [
-            "xyz:XYZ100",
             "@107",
             "PURR/USDC",
             "BTC-USDC",
             "BTC_USDC",
+            "xyz:",
+            ":TSLA",
+            "xyz:TS:LA",
+            "xyz:@107",
             "",
         ] {
             assert_eq!(codec.decode(raw), None, "{raw:?} must be rejected");
+        }
+    }
+
+    #[test]
+    fn bare_coin_admits_dex_prefixed_hip3_markets_wire_exact() {
+        let codec = SymbolCodec::BareCoin { quote: "USDC" };
+        let pair = codec.decode("xyz:TSLA").unwrap();
+        assert_eq!(pair.base(), "xyz:TSLA");
+        assert_eq!(pair.quote(), "USDC");
+        assert_eq!(codec.encode(&pair), "xyz:TSLA");
+
+        let shouty = codec.decode("XYZ:tsla").unwrap();
+        assert_eq!(shouty.base(), "xyz:TSLA");
+
+        for raw in ["para:STX", "mkts:US500", "hyna:1000PEPE", "km:UNITREE"] {
+            let p = codec.decode(raw).expect(raw);
+            assert_eq!(codec.encode(&p), raw);
         }
     }
 }

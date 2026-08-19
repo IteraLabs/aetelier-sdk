@@ -594,7 +594,11 @@ pub fn write_ob_parquet(
         .map(|ob| ob.bids.len() + ob.asks.len())
         .sum();
 
-    let file_symbol = snapshots[0].pair.to_canonical().replace('/', "-");
+    let file_symbol = snapshots[0]
+        .pair
+        .to_canonical()
+        .replace('/', "-")
+        .replace(':', "_");
     let file_exchange = snapshots[0].exchange.clone();
 
     let mut timestamps = Vec::with_capacity(total_rows);
@@ -670,12 +674,14 @@ pub fn write_ob_parquet(
     )
     .map_err(crate::parquet_err::from_arrow)?;
 
-    let file_ts = chrono::Utc::now().format("%Y%m%d_%H%M%S%.3f");
+    let file_ts = crate::naming::batch_stamp(snapshots.iter().map(|s| {
+        crate::naming::effective_us(s.orderbook_ts_us, s.local_orderbook_ts_us)
+    }));
     let filename = format!(
         "{}_{}_ob_{}_{}.parquet",
         file_exchange, file_symbol, mode, file_ts
     );
-    let path = output_dir.join(filename);
+    let path = crate::naming::unique_path(output_dir, &filename);
     let file = File::create(&path)?;
 
     let props = WriterProperties::builder()

@@ -38,6 +38,8 @@ pub(crate) mod parquet_err {
 }
 
 /// Orderbook I/O (Parquet, CSV, JSON, terminal)
+#[cfg(feature = "parquet")]
+pub(crate) mod naming;
 pub mod orderbooks;
 
 /// Trade I/O (Parquet)

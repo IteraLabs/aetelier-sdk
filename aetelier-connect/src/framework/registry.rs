@@ -36,6 +36,10 @@ pub enum TaskExit {
     /// Runtime failure beyond the retry budget; carries the transport cause for
     /// telemetry.
     Failed(DisconnectReason),
+    /// A finite source delivered everything it has. Terminal success: the
+    /// worker drains, flushes, and exits — never reconnects. Only finite
+    /// adapters (object-store replay) produce this; `drive()` never does.
+    Exhausted,
 }
 
 /// A venue's full integration behind the registry. Object-safe.

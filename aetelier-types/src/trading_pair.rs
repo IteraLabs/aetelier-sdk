@@ -67,20 +67,31 @@ impl<'de> Deserialize<'de> for TradingPair {
 
 // ── Construction & parsing ─────────────────────────────────────────────────
 
+fn normalize_asset(asset: &str) -> String {
+    match asset.split_once(':') {
+        Some((dex, ticker)) if !dex.is_empty() && !ticker.is_empty() => {
+            format!("{}:{}", dex.to_lowercase(), ticker.to_uppercase())
+        }
+        _ => asset.to_uppercase(),
+    }
+}
+
 impl TradingPair {
     /// Create a new trading pair from explicit base and quote assets.
     ///
-    /// Both are stored uppercase, trimmed.
+    /// Both are stored uppercase, trimmed; dex-prefixed assets (`xyz:TSLA`)
+    /// keep the dex segment lowercase — the wire-exact HIP-3 identifier.
     pub fn new(base: impl Into<String>, quote: impl Into<String>) -> Self {
         Self {
-            base: base.into().trim().to_uppercase(),
-            quote: quote.into().trim().to_uppercase(),
+            base: normalize_asset(base.into().trim()),
+            quote: normalize_asset(quote.into().trim()),
         }
     }
 
     /// Parse from the canonical `"BASE/QUOTE"` format (e.g. `"SOL/USDT"`).
     ///
-    /// Case-insensitive; stored uppercase.
+    /// Case-insensitive; stored uppercase. Dex-prefixed bases (`xyz:TSLA`)
+    /// normalize segment-wise: dex lowercase, ticker uppercase.
     pub fn from_canonical(s: &str) -> Option<Self> {
         let (base, quote) = s.split_once('/')?;
         let base = base.trim();
@@ -89,8 +100,8 @@ impl TradingPair {
             return None;
         }
         Some(Self {
-            base: base.to_uppercase(),
-            quote: quote.to_uppercase(),
+            base: normalize_asset(base),
+            quote: normalize_asset(quote),
         })
     }
 
@@ -273,6 +284,23 @@ mod tests {
     use super::*;
 
     // ── Construction ───────────────────────────────────────────────────
+
+    #[test]
+    fn dex_prefixed_bases_normalize_segmentwise_and_round_trip() {
+        let pair = TradingPair::new("XYZ:tsla", "usdc");
+        assert_eq!(pair.base(), "xyz:TSLA");
+        assert_eq!(pair.quote(), "USDC");
+        assert_eq!(pair.to_canonical(), "xyz:TSLA/USDC");
+        assert_eq!(
+            TradingPair::from_canonical("xyz:TSLA/USDC"),
+            Some(pair.clone())
+        );
+        assert_eq!(TradingPair::from_canonical("XYZ:tsla/usdc"), Some(pair));
+        assert_eq!(
+            TradingPair::new("hyna:1000pepe", "USDC").base(),
+            "hyna:1000PEPE"
+        );
+    }
 
     #[test]
     fn new_normalizes_to_uppercase() {

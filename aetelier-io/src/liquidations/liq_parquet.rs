@@ -209,7 +209,8 @@ pub fn write_liquidations_parquet_timestamped(
     output_dir: &Path,
     mode: &str,
 ) -> Result<std::path::PathBuf, PersistError> {
-    let file_ts = chrono::Utc::now().format("%Y%m%d_%H%M%S%.3f");
+    let file_ts =
+        crate::naming::batch_stamp(liquidations.iter().map(|l| l.liquidation_ts_us));
 
     let raw_symbol = liquidations
         .first()
@@ -219,13 +220,13 @@ pub fn write_liquidations_parquet_timestamped(
         .first()
         .map(|l| l.exchange.as_str())
         .unwrap_or("unknown");
-    let symbol = raw_symbol.replace('/', "-");
+    let symbol = raw_symbol.replace('/', "-").replace(':', "_");
 
     let filename = format!(
         "{}_{}_liquidations_{}_{}.parquet",
         exchange, symbol, mode, file_ts
     );
-    let path = output_dir.join(filename);
+    let path = crate::naming::unique_path(output_dir, &filename);
 
     write_liquidations_parquet(liquidations, &path)?;
     Ok(path)
