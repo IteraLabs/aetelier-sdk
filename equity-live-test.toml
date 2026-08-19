@@ -1,0 +1,29 @@
+[collect]
+exchange = "hyperliquid"
+market_type = "perpetual"
+framework_ingest = true
+
+[collect.datatypes.orderbook]
+enabled = true
+depth = 20
+
+[collect.datatypes.trades]
+enabled = true
+
+[collect.sync]
+sync_mode = "on_orderbook"
+flush_threshold = 600
+
+[collect.sync.update_frequency]
+value = 500
+unit = "Millis"
+
+[[collect.output]]
+type = "parquet"
+dir = "./datasets/hl-equity-live"
+
+[[workers]]
+symbol = "xyz:TSLA"
+
+[session]
+duration_hours = 0.08

@@ -1,0 +1,41 @@
+[collect]
+exchange = "hyperliquid"
+market_type = "perpetual"
+framework_ingest = true
+
+[collect.datatypes.orderbook]
+enabled = true
+depth = 20
+
+[collect.datatypes.trades]
+enabled = true
+
+[collect.sync]
+sync_mode = "on_orderbook"
+flush_threshold = 600
+
+[collect.sync.update_frequency]
+value = 250
+unit = "Millis"
+
+[[collect.output]]
+type = "parquet"
+dir = "./datasets/hl-equity-basket"
+
+[[workers]]
+symbol = "xyz:TSLA"
+
+[[workers]]
+symbol = "xyz:NVDA"
+
+[[workers]]
+symbol = "para:IREN"
+
+[[workers]]
+symbol = "xyz:AMD"
+
+[[workers]]
+symbol = "xyz:AAPL"
+
+[session]
+duration_hours = 1.0
