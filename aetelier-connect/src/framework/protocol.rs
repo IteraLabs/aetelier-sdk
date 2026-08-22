@@ -88,19 +88,22 @@ impl FrameCodec {
     }
 }
 
+const MAX_INFLATED_FRAME_BYTES: usize = 64 << 20;
+
 /// GZIP-inflate `bytes` to a UTF-8 string (HTX frames are gzip-compressed JSON).
 fn gunzip(bytes: &[u8]) -> Result<String, ExchangeError> {
     use std::io::Read;
-    let mut out = String::new();
+    let mut out = Vec::new();
     flate2::read::GzDecoder::new(bytes)
-        .read_to_string(&mut out)
-        .map_err(|e| {
-            ExchangeError::IoError(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                e,
-            ))
-        })?;
-    Ok(out)
+        .take(MAX_INFLATED_FRAME_BYTES as u64 + 1)
+        .read_to_end(&mut out)
+        .map_err(invalid_data)?;
+    if out.len() > MAX_INFLATED_FRAME_BYTES {
+        return Err(invalid_data(format!(
+            "gzip frame inflates past {MAX_INFLATED_FRAME_BYTES} bytes"
+        )));
+    }
+    String::from_utf8(out).map_err(invalid_data)
 }
 
 fn invalid_data<E>(e: E) -> ExchangeError
@@ -136,6 +139,75 @@ mod codec_tests {
             .inflate(FramePayload::Binary(b"hello"))
             .unwrap();
         assert_eq!(out, "hello");
+    }
+
+    fn gzip(plain: &[u8], level: flate2::Compression) -> Vec<u8> {
+        use std::io::Write;
+        let mut enc = flate2::write::GzEncoder::new(Vec::new(), level);
+        enc.write_all(plain).unwrap();
+        enc.finish().unwrap()
+    }
+
+    #[test]
+    fn gzip_empty_input_is_rejected() {
+        let err = FrameCodec::Gzip.inflate(FramePayload::Binary(&[]));
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn gzip_empty_payload_inflates_to_empty_string() {
+        let compressed = gzip(b"", flate2::Compression::default());
+        let out = FrameCodec::Gzip
+            .inflate(FramePayload::Binary(&compressed))
+            .expect("empty payload inflates");
+        assert_eq!(out, "");
+    }
+
+    #[test]
+    fn gzip_malformed_bytes_are_rejected() {
+        let err = FrameCodec::Gzip.inflate(FramePayload::Binary(b"not a gzip stream"));
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn gzip_invalid_utf8_is_rejected() {
+        let compressed = gzip(&[0xff, 0xfe, 0xfd], flate2::Compression::default());
+        let err = FrameCodec::Gzip.inflate(FramePayload::Binary(&compressed));
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn gzip_payload_just_under_the_cap_inflates() {
+        let plain = vec![b'a'; MAX_INFLATED_FRAME_BYTES - 1];
+        let compressed = gzip(&plain, flate2::Compression::none());
+        let out = FrameCodec::Gzip
+            .inflate(FramePayload::Binary(&compressed))
+            .expect("payload under the cap inflates");
+        assert_eq!(out.len(), MAX_INFLATED_FRAME_BYTES - 1);
+    }
+
+    #[test]
+    fn gzip_payload_at_the_cap_inflates() {
+        let plain = vec![b'a'; MAX_INFLATED_FRAME_BYTES];
+        let compressed = gzip(&plain, flate2::Compression::none());
+        let out = FrameCodec::Gzip
+            .inflate(FramePayload::Binary(&compressed))
+            .expect("payload at the cap inflates");
+        assert_eq!(out.len(), MAX_INFLATED_FRAME_BYTES);
+    }
+
+    #[test]
+    fn gzip_bomb_past_the_cap_is_refused() {
+        let compressed = gzip(
+            &vec![0u8; MAX_INFLATED_FRAME_BYTES + 1],
+            flate2::Compression::best(),
+        );
+        assert!(compressed.len() < MAX_INFLATED_FRAME_BYTES);
+
+        let err = FrameCodec::Gzip
+            .inflate(FramePayload::Binary(&compressed))
+            .expect_err("bomb past the cap is refused");
+        assert!(err.to_string().contains("inflates past"));
     }
 }
 
