@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- Delta orderbook Parquet declared its `side` and `exchange` columns in the opposite order to the values it wrote, so every consumer resolving by column name read exchange strings as sides and sides as exchanges. The declaration now matches the data, the sibling snapshot writer, and both readers. Readers that resolve positionally — including this crate's own — are unaffected in either direction, since no byte position moved; positional tolerance cannot express a rename, so a file written before this fix is identified by its embedded schema, where `side` precedes `exchange`.
+
+### Added
+
+- Decode bounds on untrusted input: a gzip WebSocket frame that inflates past 64 MiB and an archive object that decompresses past 256 MiB are refused rather than allocated, so a compression bomb cannot exhaust a long-running collector.
+- Deadlines on the archive HTTP client: a 15 s connect bound so a black-holed endpoint surfaces instead of parking, and a 30 s idle-read bound that fires only when no bytes arrive. No total request timeout is set, so multi-gigabyte object downloads are never killed mid-transfer.
+
+### Changed
+
+- A failed response-body read on the archive path is now classified and retried by the same transport policy as a failed send, instead of terminating the run; the two paths share one retry budget.
+
 ## v0.1.0 — 2026-07-28
 
 The first public release: the public front door of the aetelier market-data engine. Five crates — types, connect, io, telemetry, and the sdk facade — with 12 conformance-certified venues, exact loss accounting, and columnar Parquet persistence.

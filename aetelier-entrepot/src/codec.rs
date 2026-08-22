@@ -2,14 +2,31 @@ use std::io::{Read, Write};
 
 use crate::error::EntrepotError;
 
+const MAX_DECODED_OBJECT_BYTES: usize = 256 << 20;
+
 pub fn decode_lz4(key: &str, bytes: &[u8]) -> Result<Vec<u8>, EntrepotError> {
+    decode_lz4_capped(key, bytes, MAX_DECODED_OBJECT_BYTES)
+}
+
+fn decode_lz4_capped(
+    key: &str,
+    bytes: &[u8],
+    cap: usize,
+) -> Result<Vec<u8>, EntrepotError> {
     let mut out = Vec::new();
     lz4_flex::frame::FrameDecoder::new(bytes)
+        .take(cap as u64 + 1)
         .read_to_end(&mut out)
         .map_err(|e| EntrepotError::Decode {
             key: key.to_string(),
             reason: e.to_string(),
         })?;
+    if out.len() > cap {
+        return Err(EntrepotError::Decode {
+            key: key.to_string(),
+            reason: format!("object inflates past {cap} bytes"),
+        });
+    }
     Ok(out)
 }
 
@@ -53,5 +70,46 @@ mod tests {
         let lines = utf8_lines("k", b"a\nb\nc").unwrap();
         assert_eq!(lines, ["a", "b", "c"]);
         assert!(utf8_lines("k", &[0xff, 0xfe, 0x00]).is_err());
+    }
+
+    #[test]
+    fn empty_input_decodes_to_no_bytes_and_no_lines() {
+        let decoded = decode_lz4("empty.lz4", b"").unwrap();
+        assert!(decoded.is_empty());
+        assert!(utf8_lines("empty.lz4", &decoded).unwrap().is_empty());
+    }
+
+    #[test]
+    fn payload_at_the_cap_decodes() {
+        let cap = 4096;
+        let encoded = encode_lz4(&vec![b'a'; cap]);
+        let out = decode_lz4_capped("at-cap.lz4", &encoded, cap).unwrap();
+        assert_eq!(out.len(), cap);
+    }
+
+    #[test]
+    fn payload_one_byte_past_the_cap_is_refused() {
+        let cap = 4096;
+        let encoded = encode_lz4(&vec![b'a'; cap + 1]);
+        let err = decode_lz4_capped("over-cap.lz4", &encoded, cap).unwrap_err();
+        assert!(matches!(err, EntrepotError::Decode { .. }));
+        assert!(err.to_string().contains("inflates past"));
+    }
+
+    #[test]
+    fn a_bomb_is_refused_without_inflating_past_the_cap() {
+        let cap = 1 << 20;
+        let encoded = encode_lz4(&vec![0u8; 64 << 20]);
+        assert!(encoded.len() < cap);
+        let err = decode_lz4_capped("bomb.lz4", &encoded, cap).unwrap_err();
+        assert!(err.to_string().contains("inflates past"));
+    }
+
+    #[test]
+    fn the_default_cap_admits_the_largest_archive_object() {
+        const LARGEST_ARCHIVE_OBJECT_BYTES: usize = 40 << 20;
+        let encoded = encode_lz4(&vec![b'{'; LARGEST_ARCHIVE_OBJECT_BYTES]);
+        let out = decode_lz4("market_data/20260801/9/l2Book/BTC.lz4", &encoded).unwrap();
+        assert_eq!(out.len(), LARGEST_ARCHIVE_OBJECT_BYTES);
     }
 }

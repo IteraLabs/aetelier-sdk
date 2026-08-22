@@ -10,10 +10,20 @@
 #[cfg(test)]
 #[cfg(feature = "parquet")]
 mod tests {
-    use aetelier_io::orderbooks::ob_parquet::{load_parquet_to_ob, write_ob_parquet};
+    use aetelier_io::orderbooks::ob_parquet::{
+        load_parquet_to_delta, load_parquet_to_ob, write_ob_delta_parquet,
+        write_ob_parquet,
+    };
     use aetelier_types::orderbooks::delta::NormalizedDelta;
     use aetelier_types::orderbooks::{Orderbook, OrderbookDelta, decimal_to_f64};
     use aetelier_types::trading_pair::TradingPair;
+    use arrow::array::AsArray;
+    use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+    use rust_decimal::Decimal;
+    use std::collections::BTreeMap;
+    use std::fs::File;
+    use std::path::{Path, PathBuf};
+    use std::str::FromStr;
     use tempfile::tempdir;
 
     // ── Helpers ──────────────────────────────────────────────────────────
@@ -311,5 +321,148 @@ mod tests {
             got.source_orderbook_rtt_us, SOURCE_RTT,
             "source_orderbook_rtt_us must survive parquet round-trip"
         );
+    }
+
+    const DELTA_FIELD_NAMES: [&str; 7] = [
+        "timestamp_us",
+        "symbol",
+        "exchange",
+        "side",
+        "level",
+        "price",
+        "size",
+    ];
+
+    fn build_delta(
+        exchange: &str,
+        bids: &[(&str, &str)],
+        asks: &[(&str, &str)],
+    ) -> OrderbookDelta {
+        fn to_map(levels: &[(&str, &str)]) -> BTreeMap<Decimal, Decimal> {
+            levels
+                .iter()
+                .map(|(price, size)| {
+                    (
+                        Decimal::from_str(price).expect("price literal"),
+                        Decimal::from_str(size).expect("size literal"),
+                    )
+                })
+                .collect()
+        }
+
+        OrderbookDelta::from_maps(
+            TradingPair::new("BTC", "USDT"),
+            exchange,
+            to_map(bids),
+            to_map(asks),
+        )
+    }
+
+    fn write_delta(dir: &Path, delta: &OrderbookDelta) -> PathBuf {
+        let path = dir.join("delta.parquet");
+        write_ob_delta_parquet(delta, &path).expect("delta parquet write");
+        path
+    }
+
+    fn declared_field_names(path: &Path) -> Vec<String> {
+        let file = File::open(path).expect("open delta parquet");
+        let builder =
+            ParquetRecordBatchReaderBuilder::try_new(file).expect("parquet metadata");
+        builder
+            .schema()
+            .fields()
+            .iter()
+            .map(|field| field.name().clone())
+            .collect()
+    }
+
+    fn utf8_column_by_name(path: &Path, name: &str) -> Vec<String> {
+        let file = File::open(path).expect("open delta parquet");
+        let builder =
+            ParquetRecordBatchReaderBuilder::try_new(file).expect("parquet metadata");
+        let reader = builder.build().expect("parquet reader");
+
+        let mut values = Vec::new();
+        for batch_result in reader {
+            let batch = batch_result.expect("record batch");
+            let index = batch
+                .schema()
+                .index_of(name)
+                .unwrap_or_else(|_| panic!("column '{name}' not declared"));
+            let column = batch.column(index).as_string::<i32>();
+            for row in 0..batch.num_rows() {
+                values.push(column.value(row).to_string());
+            }
+        }
+        values
+    }
+
+    #[test]
+    fn test_delta_parquet_named_columns_hold_their_own_values() {
+        let dir = tempdir().unwrap();
+        let delta = build_delta(
+            "bybit",
+            &[("21921.73", "0.063"), ("21921.00", "1.000")],
+            &[("21922.00", "0.500"), ("21923.50", "2.000")],
+        );
+        let path = write_delta(dir.path(), &delta);
+
+        assert_eq!(declared_field_names(&path), DELTA_FIELD_NAMES);
+        assert_eq!(
+            utf8_column_by_name(&path, "side"),
+            vec!["bid", "bid", "ask", "ask"],
+            "the column named 'side' must hold side values"
+        );
+        assert_eq!(
+            utf8_column_by_name(&path, "exchange"),
+            vec!["bybit"; 4],
+            "the column named 'exchange' must hold exchange values"
+        );
+    }
+
+    #[test]
+    fn test_delta_parquet_empty_book_declares_named_columns() {
+        let dir = tempdir().unwrap();
+        let delta = build_delta("bybit", &[], &[]);
+        let path = write_delta(dir.path(), &delta);
+
+        assert_eq!(declared_field_names(&path), DELTA_FIELD_NAMES);
+        assert!(utf8_column_by_name(&path, "side").is_empty());
+        assert!(utf8_column_by_name(&path, "exchange").is_empty());
+    }
+
+    #[test]
+    fn test_delta_parquet_single_level_one_sided_book() {
+        let dir = tempdir().unwrap();
+        let delta = build_delta("kraken", &[("21921.73", "0.063")], &[]);
+        let path = write_delta(dir.path(), &delta);
+
+        assert_eq!(utf8_column_by_name(&path, "side"), vec!["bid"]);
+        assert_eq!(utf8_column_by_name(&path, "exchange"), vec!["kraken"]);
+    }
+
+    #[test]
+    fn test_delta_parquet_exchange_named_like_a_side_stays_in_its_column() {
+        let dir = tempdir().unwrap();
+        let delta =
+            build_delta("bid", &[("21921.73", "0.063")], &[("21922.00", "0.500")]);
+        let path = write_delta(dir.path(), &delta);
+
+        assert_eq!(utf8_column_by_name(&path, "side"), vec!["bid", "ask"]);
+        assert_eq!(utf8_column_by_name(&path, "exchange"), vec!["bid", "bid"]);
+    }
+
+    #[test]
+    fn test_delta_parquet_positional_reader_unaffected_by_field_rename() {
+        let dir = tempdir().unwrap();
+        let delta =
+            build_delta("bybit", &[("21921.73", "0.063")], &[("21922.00", "0.500")]);
+        let path = write_delta(dir.path(), &delta);
+
+        let loaded = load_parquet_to_delta(&path).expect("delta parquet read");
+        assert_eq!(loaded.exchange(), "bybit");
+        assert_eq!(loaded.pair(), &TradingPair::new("BTC", "USDT"));
+        assert_eq!(loaded.bid_depth(), 1);
+        assert_eq!(loaded.ask_depth(), 1);
     }
 }
