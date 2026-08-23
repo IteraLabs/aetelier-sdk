@@ -4,6 +4,7 @@ use quick_xml::events::Event;
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 use crate::error::EntrepotError;
 use crate::pacing::Jitter;
@@ -164,6 +165,17 @@ pub fn verify_integrity(
     Ok(())
 }
 
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+const IDLE_READ_TIMEOUT: Duration = Duration::from_secs(30);
+
+fn http_client(connect: Duration, idle_read: Duration) -> reqwest::Client {
+    reqwest::Client::builder()
+        .connect_timeout(connect)
+        .read_timeout(idle_read)
+        .build()
+        .expect("default tls backend builds")
+}
+
 pub struct S3Client {
     cfg: S3Config,
     http: reqwest::Client,
@@ -176,7 +188,7 @@ impl S3Client {
     pub fn new(cfg: S3Config) -> Self {
         Self {
             cfg,
-            http: reqwest::Client::new(),
+            http: http_client(CONNECT_TIMEOUT, IDLE_READ_TIMEOUT),
             policy: RetryPolicy::default(),
             pace: Jitter::default(),
             stats: Arc::new(TransferStats::default()),
@@ -186,6 +198,12 @@ impl S3Client {
     pub fn with_policy(mut self, policy: RetryPolicy, pace: Jitter) -> Self {
         self.policy = policy;
         self.pace = pace;
+        self
+    }
+
+    #[cfg(test)]
+    fn with_deadlines(mut self, connect: Duration, idle_read: Duration) -> Self {
+        self.http = http_client(connect, idle_read);
         self
     }
 
@@ -223,6 +241,21 @@ impl S3Client {
         extra.push(("authorization".to_string(), signed.authorization));
         extra.push(("x-amz-date".to_string(), signed.x_amz_date));
         extra
+    }
+
+    async fn retry_transport(
+        &self,
+        err: reqwest::Error,
+        label: &str,
+        attempt: u32,
+    ) -> Option<EntrepotError> {
+        if !is_retryable_transport(&err) || self.policy.exhausted(attempt) {
+            return Some(err.into());
+        }
+        tracing::warn!(label, error = %err, attempt, "entrepot.s3.transport_retry");
+        self.stats.retries.fetch_add(1, Ordering::Relaxed);
+        tokio::time::sleep(self.policy.delay_for(attempt, None)).await;
+        None
     }
 
     async fn get_with_retry(
@@ -288,15 +321,23 @@ impl S3Client {
                                     "entrepot.s3.request_charged_missing"
                                 );
                             }
-                            let body = resp
-                                .bytes()
-                                .await
-                                .map(|b| b.to_vec())
-                                .map_err(EntrepotError::from)?;
-                            self.stats
-                                .bytes_in
-                                .fetch_add(body.len() as u64, Ordering::Relaxed);
-                            return Ok((body, meta));
+                            match resp.bytes().await {
+                                Ok(body) => {
+                                    let body = body.to_vec();
+                                    self.stats
+                                        .bytes_in
+                                        .fetch_add(body.len() as u64, Ordering::Relaxed);
+                                    return Ok((body, meta));
+                                }
+                                Err(err) => {
+                                    if let Some(fatal) =
+                                        self.retry_transport(err, label, attempt).await
+                                    {
+                                        return Err(fatal);
+                                    }
+                                    attempt += 1;
+                                }
+                            }
                         }
                         Verdict::RetryAfterBackoff => {
                             let hint = resp
@@ -329,12 +370,9 @@ impl S3Client {
                     }
                 }
                 Err(err) => {
-                    if !is_retryable_transport(&err) || self.policy.exhausted(attempt) {
-                        return Err(err.into());
+                    if let Some(fatal) = self.retry_transport(err, label, attempt).await {
+                        return Err(fatal);
                     }
-                    tracing::warn!(label, error = %err, attempt, "entrepot.s3.transport_retry");
-                    self.stats.retries.fetch_add(1, Ordering::Relaxed);
-                    tokio::time::sleep(self.policy.delay_for(attempt, None)).await;
                     attempt += 1;
                 }
             }
@@ -645,8 +683,6 @@ mod tests {
         );
     }
 
-    use std::time::Duration;
-
     fn http_response(status: u16, headers: &[(&str, &str)], body: &[u8]) -> Vec<u8> {
         let mut head = format!(
             "HTTP/1.1 {status} MOCK\r\nconnection: close\r\ncontent-length: {}\r\n",
@@ -661,6 +697,30 @@ mod tests {
         out
     }
 
+    fn truncated_http_response(declared_len: usize, sent: &[u8]) -> Vec<u8> {
+        let mut out = format!(
+            "HTTP/1.1 200 MOCK\r\nconnection: close\r\ncontent-length: {declared_len}\r\n\r\n"
+        )
+        .into_bytes();
+        out.extend_from_slice(sent);
+        out
+    }
+
+    async fn read_request_head(sock: &mut tokio::net::TcpStream) {
+        let mut buf = [0u8; 8192];
+        let mut seen: Vec<u8> = Vec::new();
+        loop {
+            let n = tokio::io::AsyncReadExt::read(sock, &mut buf).await.unwrap();
+            if n == 0 {
+                break;
+            }
+            seen.extend_from_slice(&buf[..n]);
+            if seen.windows(4).any(|w| w == b"\r\n\r\n") {
+                break;
+            }
+        }
+    }
+
     async fn serve(
         responses: Vec<Vec<u8>>,
     ) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
@@ -669,25 +729,42 @@ mod tests {
         let handle = tokio::spawn(async move {
             for resp in responses {
                 let (mut sock, _) = listener.accept().await.unwrap();
-                let mut buf = [0u8; 8192];
-                let mut seen: Vec<u8> = Vec::new();
-                loop {
-                    let n = tokio::io::AsyncReadExt::read(&mut sock, &mut buf)
-                        .await
-                        .unwrap();
-                    if n == 0 {
-                        break;
-                    }
-                    seen.extend_from_slice(&buf[..n]);
-                    if seen.windows(4).any(|w| w == b"\r\n\r\n") {
-                        break;
-                    }
-                }
+                read_request_head(&mut sock).await;
                 tokio::io::AsyncWriteExt::write_all(&mut sock, &resp)
                     .await
                     .unwrap();
                 tokio::io::AsyncWriteExt::shutdown(&mut sock).await.ok();
             }
+        });
+        (addr, handle)
+    }
+
+    async fn serve_stalled_body_then(
+        hold: Duration,
+        second: Vec<u8>,
+    ) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = tokio::spawn(async move {
+            let (mut stalled, _) = listener.accept().await.unwrap();
+            read_request_head(&mut stalled).await;
+            tokio::io::AsyncWriteExt::write_all(
+                &mut stalled,
+                &truncated_http_response(13, b""),
+            )
+            .await
+            .unwrap();
+            let held = tokio::spawn(async move {
+                tokio::time::sleep(hold).await;
+                drop(stalled);
+            });
+            let (mut sock, _) = listener.accept().await.unwrap();
+            read_request_head(&mut sock).await;
+            tokio::io::AsyncWriteExt::write_all(&mut sock, &second)
+                .await
+                .unwrap();
+            tokio::io::AsyncWriteExt::shutdown(&mut sock).await.ok();
+            held.await.unwrap();
         });
         (addr, handle)
     }
@@ -793,6 +870,101 @@ mod tests {
         let stats = client.stats();
         assert_eq!(stats.get_requests, 2);
         assert_eq!(stats.retries, 1);
+    }
+
+    #[tokio::test]
+    async fn body_read_timeout_retries_instead_of_terminating_the_run() {
+        let body = b"after-a-stall".to_vec();
+        let etag = md5_hex(&body);
+        let hold = Duration::from_secs(1);
+        let (addr, server) = serve_stalled_body_then(
+            hold,
+            http_response(200, &[("etag", &format!("\"{etag}\""))], &body),
+        )
+        .await;
+        let client = fast_client(addr, false)
+            .with_deadlines(CONNECT_TIMEOUT, Duration::from_millis(50));
+        let started = std::time::Instant::now();
+        let fetched = client.get_object("k").await.unwrap();
+        let elapsed = started.elapsed();
+        server.await.unwrap();
+        assert_eq!(fetched.bytes, body);
+        assert!(
+            elapsed < hold / 2,
+            "read deadline did not fire: {elapsed:?}"
+        );
+        let stats = client.stats();
+        assert_eq!(stats.get_requests, 2);
+        assert_eq!(stats.retries, 1);
+        assert_eq!(stats.bytes_in, body.len() as u64);
+    }
+
+    #[tokio::test]
+    async fn truncated_body_retries_instead_of_terminating_the_run() {
+        let body = b"whole-object".to_vec();
+        let etag = md5_hex(&body);
+        let (addr, server) = serve(vec![
+            truncated_http_response(64, b"half"),
+            http_response(200, &[("etag", &format!("\"{etag}\""))], &body),
+        ])
+        .await;
+        let client = fast_client(addr, false);
+        let fetched = client.get_object("k").await.unwrap();
+        server.await.unwrap();
+        assert_eq!(fetched.bytes, body);
+        assert_eq!(client.stats().retries, 1);
+    }
+
+    #[tokio::test]
+    async fn repeated_body_failures_exhaust_the_transport_budget() {
+        let (addr, server) = serve(vec![
+            truncated_http_response(64, b"half"),
+            truncated_http_response(64, b"half"),
+            truncated_http_response(64, b"half"),
+        ])
+        .await;
+        let client = fast_client(addr, false);
+        let err = client.get_object("k").await.unwrap_err();
+        server.await.unwrap();
+        assert!(matches!(err, EntrepotError::Transport(_)));
+        let stats = client.stats();
+        assert_eq!(stats.get_requests, 3);
+        assert_eq!(stats.retries, 2);
+    }
+
+    #[test]
+    fn the_client_carries_an_idle_read_deadline_and_no_total_timeout() {
+        let client = S3Client::new(S3Config::anonymous("mock", "us-east-1", None));
+        let shape = format!("{:?}", client.http);
+        assert!(shape.contains("read_timeout: 30s"), "{shape}");
+        assert!(!shape.contains("TotalTimeout"), "{shape}");
+    }
+
+    #[tokio::test]
+    async fn a_black_holed_connect_surfaces_instead_of_parking() {
+        let cfg = S3Config::anonymous(
+            "mock",
+            "us-east-1",
+            Some("http://192.0.2.1:81".to_string()),
+        );
+        let client = S3Client::new(cfg)
+            .with_policy(
+                RetryPolicy {
+                    max_retries: 0,
+                    base_delay: Duration::from_millis(1),
+                    max_delay: Duration::from_millis(5),
+                    multiplier: 2.0,
+                },
+                Jitter::new(Duration::from_millis(1), Duration::from_millis(2)),
+            )
+            .with_deadlines(Duration::from_millis(50), IDLE_READ_TIMEOUT);
+        let started = std::time::Instant::now();
+        let err = client.get_object("k").await.unwrap_err();
+        let EntrepotError::Transport(source) = err else {
+            panic!("expected a transport error");
+        };
+        assert!(source.is_connect() || source.is_timeout(), "{source}");
+        assert!(started.elapsed() < Duration::from_secs(5), "parked");
     }
 
     #[test]

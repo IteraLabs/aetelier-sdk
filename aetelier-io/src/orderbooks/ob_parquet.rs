@@ -28,7 +28,7 @@ use std::path::Path;
 ///
 /// | Column | Arrow Type | Description |
 /// |--------|------------|-------------|
-/// | `timestamp_us` | `UInt64` | Unix timestamp in milliseconds |
+/// | `timestamp_us` | `UInt64` | UTC epoch microseconds |
 /// | `symbol` | `Utf8` | Trading pair symbol |
 /// | `exchange` | `Utf8` | Exchange where the symbol is traded |
 /// | `side` | `Utf8` | "bid" or "ask" |
@@ -152,8 +152,8 @@ pub fn write_ob_delta_parquet(
     let schema = Schema::new(vec![
         Field::new("timestamp_us", DataType::UInt64, false),
         Field::new("symbol", DataType::Utf8, false),
-        Field::new("side", DataType::Utf8, false),
         Field::new("exchange", DataType::Utf8, false),
+        Field::new("side", DataType::Utf8, false),
         Field::new("level", DataType::UInt64, false),
         Field::new("price", DataType::Float64, false),
         Field::new("size", DataType::Float64, false),
