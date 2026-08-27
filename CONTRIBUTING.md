@@ -63,6 +63,18 @@ In the case that you've found a bug, please make sure you are able to answer the
 - What did you see instead? 
 ```
 
+## Changelog
+
+Every promotion into `main` adds one line under `Unreleased` → `Promotions` in
+`CHANGELOG.md`: date, source branch, effect. One sentence, no wrapping prose.
+
+```
+- 2026-08-19 · `feat/entrepot-transport` (#11) — object-store transport crate, archive replay, bounded backfill retries.
+```
+
+Released version entries are frozen. A released entry is edited only to correct
+a factual error, never to restate its scope.
+
 ## Publishing to crates.io
 
 The workspace crates carry `publish = false` until a maintainer flips it for a
@@ -71,9 +83,10 @@ it depends on is already on the registry:
 
 1. `aetelier-types`
 2. `aetelier-telemetry`
-3. `aetelier-connect`
-4. `aetelier-io` (its optional `connect` feature depends on `aetelier-connect`)
-5. `aetelier-sdk`
+3. `aetelier-entrepot` (`aetelier-connect` depends on it)
+4. `aetelier-connect`
+5. `aetelier-io` (its optional `connect` feature depends on `aetelier-connect`)
+6. `aetelier-sdk`
 
 `aetelier-connect` and `aetelier-io` reference each other only through
 dev-dependencies (a cycle crates.io permits); path-only dev-deps are stripped at
