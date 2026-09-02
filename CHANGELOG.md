@@ -1,6 +1,21 @@
 # Changelog
 
+Every promotion into `main` adds one line under `Unreleased` → `Promotions`:
+date, source branch, effect. Released version entries are frozen; a released
+entry is edited only to correct a factual error, never to restate its scope.
+
 ## Unreleased
+
+### Promotions
+
+- 2026-08-22 · `staging` (#14) — staging promoted to `main`.
+- 2026-08-22 · `chore/pr-template` (#13) — pull-request template gains evidence sections.
+- 2026-08-22 · `fix/storage-type-correctness` (#12) — decode bounds, archive client deadlines, delta column declaration order.
+- 2026-08-19 · `feat/entrepot-transport` (#11) — `aetelier-entrepot` object-store transport crate, Hyperliquid S3 archive replay, `entrepot` binary, bounded backfill retries, decode-panic containment.
+- 2026-08-14 · `chore/hyperliquid-monitoring-tune` (#9) — fleet heartbeat, settlement window contract, arrival-clock settlement drain.
+- 2026-08-10 · `hotfix/pin-actions-scrub-comments` (#8) — release workflow actions pinned to commit SHAs.
+- 2026-08-10 · hyperliquid WSS (#7) — hyperliquid registered as the thirteenth framework adapter (perpetual, FullRefresh); funding and open-interest settlement path; stage-2 conformance.
+- 2026-08-05 · `feature/delta-before-snapshot-guards` — out-of-band seeding taxonomy, in-band buffering exit, seed deadline.
 
 ### Fixed
 
@@ -15,7 +30,7 @@
 
 - A failed response-body read on the archive path is now classified and retried by the same transport policy as a failed send, instead of terminating the run; the two paths share one retry budget.
 
-## v0.1.0 — 2026-07-28
+## v0.1.0 — 2026-07-30
 
 The first public release: the public front door of the aetelier market-data engine. Five crates — types, connect, io, telemetry, and the sdk facade — with 12 conformance-certified venues, exact loss accounting, and columnar Parquet persistence.
 

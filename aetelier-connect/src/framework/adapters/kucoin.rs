@@ -110,6 +110,13 @@ impl KucoinHooks {
 
 #[async_trait::async_trait]
 impl ProtocolHooks for KucoinHooks {
+    /// The bullet token expires with the session, so the socket is rotated
+    /// ahead of the venue's own deadline rather than dying on it. Read from
+    /// the profile so the declaration has one home.
+    fn connection_lifetime(&self) -> Option<std::time::Duration> {
+        KUCOIN_PROFILE.budget.connection_lifetime
+    }
+
     /// `prepare` overrides this with the bullet endpoint. Never connected to
     /// directly (KuCoin rejects a token-less URL).
     fn endpoint(&self) -> String {
@@ -364,6 +371,16 @@ pub use crate::sources::kucoin::rest::KucoinRestSnapshot;
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn the_bullet_lifetime_reaches_the_transport_hook() {
+        use crate::framework::protocol::ProtocolHooks;
+        assert_eq!(
+            KucoinHooks::with_connect_id("test".into()).connection_lifetime(),
+            Some(std::time::Duration::from_secs(24 * 60 * 60)),
+            "the profile declaration must be what the transport rotates on"
+        );
+    }
     use super::*;
     use crate::framework::protocol::Heartbeat;
     use crate::sources::kucoin::responses::{

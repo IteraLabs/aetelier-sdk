@@ -17,9 +17,11 @@
 
 # aetelier-sdk
 
-A Rust engine for high-frequency market-microstructure data: live connectivity to 12 crypto exchanges, verified order-book reconstruction, trade loss accounting, grid synchronization, and columnar Parquet I/O — built for quant researchers who need to trust every row.
+A Rust engine for high-frequency market-microstructure data: live connectivity to 13 crypto exchanges, verified order-book reconstruction, trade loss accounting, grid synchronization, and columnar Parquet I/O — built for quant researchers who need to trust every row.
 
 Every venue decoder is certified by a conformance suite that replays real captured wire frames through the production decode path on every CI run: seeding, delta application, sequence-gap detection, checksum validation, trade continuity, and physical book invariants (never crossed, strictly positive, ordered). Exact decimal arithmetic in memory; analytics-friendly Float64 Parquet on disk.
+
+Machine-readable entry point: [AGENTS.md](AGENTS.md).
 
 ## 60-second quickstart
 
@@ -65,7 +67,7 @@ Depend on the workspace via git, pinned to the release tag:
 aetelier-sdk = { git = "https://github.com/IteraLabs/aetelier-sdk", tag = "v0.1.0", features = ["parquet"] }
 ```
 
-The five crates carry the layout and publish order for a registry release; [CONTRIBUTING.md](CONTRIBUTING.md) documents both.
+The six crates carry the layout and publish order for a registry release; [CONTRIBUTING.md](CONTRIBUTING.md) documents both.
 
 ## Workspace
 
@@ -75,11 +77,30 @@ The five crates carry the layout and publish order for a registry release; [CONT
 | `aetelier-connect` | Exchange connectivity: WSS transports, per-venue adapters, reconstruction runtime, synchronizers, workers. |
 | `aetelier-io` | Columnar persistence: Parquet/JSON/CSV writers and readers, dataset tooling, batch rehydration. |
 | `aetelier-telemetry` | Metrics and log surfaces for collectors. |
+| `aetelier-entrepot` | Object-store transport for aetelier collectors: signed S3 access, listing, retrieval, and archive codecs. |
 | `aetelier-sdk` | The curated facade: one dependency, named re-exports of the recommended path. |
 
 ## Venues
 
-All 12 spot venues run the same certified framework path: binance, bitget, bitso, bybit, coinbase, gateio, htx, kraken, kucoin, okx, poloniex, upbit. Certification means the venue's real captured frames replay through the production decoder in CI across the full conformance matrix — decode surface, seeding taxonomy, symbol canonicalization, book delta application, gap detection, checksum validation where the venue supplies one, trade continuity where the venue's ids permit exact accounting, and physical book/trade invariants.
+Thirteen venues run the same certified framework path — twelve spot plus hyperliquid perpetuals. Certification means the venue's real captured frames replay through the production decoder in CI across the full conformance matrix: decode surface, seeding taxonomy, symbol canonicalization, book delta application, gap detection, checksum validation where the venue supplies one, trade continuity where the venue's ids permit exact accounting, and physical book/trade invariants.
+
+| Venue | Market | Protocol | Book model |
+|---|---|---|---|
+| binance | Spot | `binance-spot-v3` | SeqDelta |
+| bitget | Spot | `bitget-v2` | SeqDelta |
+| bitso | Spot | `bitso-v3` | L3 |
+| bybit | Spot | `bybit-v5` | SeqDelta |
+| coinbase | Spot | `coinbase-adv-v3` | SeqDelta |
+| gateio | Spot | `gateio-v4` | FullRefresh |
+| htx | Spot | `htx-v2` | SeqDelta |
+| hyperliquid | Perpetual | `hyperliquid-v1` | FullRefresh |
+| kraken | Spot | `kraken-v2` | ChecksumDelta |
+| kucoin | Spot | `kucoin-v1` | SeqDelta |
+| okx | Spot | `okx-v5` | SeqDelta |
+| poloniex | Spot | `poloniex-v2` | SeqDelta |
+| upbit | Spot | `upbit-v1` | FullRefresh |
+
+**Last integration checkpoint: 2026-08-05** — the capture date of the newest venue's conformance fixture (hyperliquid, cycle #5). `Protocol` is the venue's pinned wire revision: a bump the venue ships that this repo has not adopted fails at boot rather than decoding wrong. `Book model` is the reconstruction the adapter declares — full-refresh snapshots, sequence-validated deltas, checksum-validated deltas, or per-order L3.
 
 ## Data honesty
 

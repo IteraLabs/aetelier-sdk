@@ -103,12 +103,14 @@ impl ProtocolHooks for BybitHooks {
         }
         match v.get("success").and_then(|s| s.as_bool()) {
             Some(true) => AckOutcome::Accepted,
-            Some(false) => AckOutcome::Rejected(
-                v.get("ret_msg")
+            Some(false) => AckOutcome::Rejected {
+                code: v.get("ret_code").and_then(|c| c.as_i64()),
+                reason: v
+                    .get("ret_msg")
                     .and_then(|m| m.as_str())
                     .unwrap_or("subscribe failed")
                     .to_string(),
-            ),
+            },
             None => AckOutcome::NotAck,
         }
     }
@@ -405,7 +407,10 @@ mod tests {
         );
         assert_eq!(
             h.classify_ack(r#"{"success":false,"op":"subscribe","ret_msg":"bad topic"}"#),
-            AckOutcome::Rejected("bad topic".into())
+            AckOutcome::Rejected {
+                code: None,
+                reason: "bad topic".into(),
+            }
         );
         assert_eq!(
             h.classify_ack(r#"{"topic":"publicTrade.BTCUSDT","data":[]}"#),

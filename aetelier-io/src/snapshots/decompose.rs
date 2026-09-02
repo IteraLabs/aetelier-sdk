@@ -78,6 +78,13 @@ mod tests {
         s.parse().unwrap()
     }
 
+    fn fr_epoch(recv_seq: u64, conn_epoch: u32) -> FundingRate {
+        FundingRate {
+            conn_epoch,
+            ..fr(recv_seq)
+        }
+    }
+
     fn fr(recv_seq: u64) -> FundingRate {
         FundingRate {
             funding_rate_ts_us: 0,
@@ -115,6 +122,33 @@ mod tests {
         let out = decompose_snapshots(&[snap_a, snap_b]);
         let seqs: Vec<u64> = out.funding_rates.iter().map(|f| f.recv_seq).collect();
         assert_eq!(seqs, vec![1, 2, 3], "wire truth: one row per push");
+    }
+
+    #[test]
+    fn reconnect_rows_reusing_a_recv_seq_survive_on_their_epoch() {
+        let mut before = MarketSnapshot::empty(1_000_000);
+        before.funding_rate = vec![fr_epoch(1, 1_800_000_001)];
+        let mut after = MarketSnapshot::empty(2_000_000);
+        after.funding_rate = vec![fr_epoch(1, 1_800_000_002)];
+
+        let out = decompose_snapshots(&[before, after]);
+        let epochs: Vec<u32> = out.funding_rates.iter().map(|f| f.conn_epoch).collect();
+        assert_eq!(
+            epochs,
+            vec![1_800_000_001, 1_800_000_002],
+            "recv_seq restarts at 1 on reconnect; the epoch keeps both rows"
+        );
+    }
+
+    #[test]
+    fn one_epoch_still_collapses_a_repeated_recv_seq() {
+        let mut snap_a = MarketSnapshot::empty(1_000_000);
+        snap_a.funding_rate = vec![fr_epoch(2, 1_800_000_001)];
+        let mut snap_b = MarketSnapshot::empty(2_000_000);
+        snap_b.funding_rate = vec![fr_epoch(2, 1_800_000_001)];
+
+        let out = decompose_snapshots(&[snap_a, snap_b]);
+        assert_eq!(out.funding_rates.len(), 1);
     }
 
     #[test]
