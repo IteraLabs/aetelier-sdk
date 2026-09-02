@@ -1076,6 +1076,20 @@ impl MarketWorker {
         // Reconnect loop: a runtime that ends on `ResyncRequired` (a self-seeded
         // book gapped) or a socket disconnect re-establishes the connection — a
         let declared_set = core.datatypes().declared_set();
+        // Venue-guaranteed publication cadences, read once off the adapter.
+        // A datatype absent here is never judged silent.
+        let declared_cadences: Vec<(
+            crate::framework::feed::FeedDatatype,
+            std::time::Duration,
+        )> = [
+            crate::framework::feed::FeedDatatype::Orders,
+            crate::framework::feed::FeedDatatype::Trades,
+            crate::framework::feed::FeedDatatype::FundingRates,
+            crate::framework::feed::FeedDatatype::OpenInterest,
+        ]
+        .into_iter()
+        .filter_map(|dt| adapter.datatype_cadence(dt).map(|c| (dt, c)))
+        .collect();
         // fresh subscribe re-seeds. Shutdown / `Stop` exits.
         while !stopped && !*shutdown.borrow() {
             // Ingest: adapter -> DomainEvent. Sync: DomainEvent -> ReconstructedEvent.
@@ -1104,6 +1118,7 @@ impl MarketWorker {
             )
             .with_feeds(feeds.clone())
             .with_trade_seq_carry(trade_seq_carry.clone())
+            .with_datatype_cadence(declared_cadences.clone())
             .with_max_depth(config_depth);
             let (recon_tx, mut recon_rx) = mpsc::channel(channel_capacity);
             let runtime_handle = tokio::spawn(runtime.run(

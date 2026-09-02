@@ -76,6 +76,10 @@ use super::symbol::SymbolCodec;
 use crate::errors::ExchangeError;
 use aetelier_types::config::markets::market_config::{DeclaredDatatype, DeclaredSet};
 
+/// Archive replay opens no socket, so its rows carry the unset epoch rather
+/// than borrowing a live connection's identity.
+const ARCHIVE_CONN_EPOCH: u32 = 0;
+
 pub struct DecodedLine {
     pub events: Vec<DomainEvent>,
     pub local_ts_us: Option<u64>,
@@ -510,7 +514,7 @@ async fn emit_ctx_rows(
         }
         for mut event in events {
             *recv_seq += 1;
-            event.stamp_local(ts_us, 0, *recv_seq);
+            event.stamp_local(ts_us, 0, *recv_seq, ARCHIVE_CONN_EPOCH);
             metrics.bump_msgs();
             if tx.send(event).await.is_err() {
                 return Err(());
@@ -764,7 +768,12 @@ impl ExchangeAdapter for HyperliquidEntrepotAdapter {
                                 let local = decoded.local_ts_us.unwrap_or_else(now_us);
                                 for mut event in decoded.events {
                                     recv_seq += 1;
-                                    event.stamp_local(local, 0, recv_seq);
+                                    event.stamp_local(
+                                        local,
+                                        0,
+                                        recv_seq,
+                                        ARCHIVE_CONN_EPOCH,
+                                    );
                                     metrics.bump_msgs();
                                     if tx.send(event).await.is_err() {
                                         closed = true;

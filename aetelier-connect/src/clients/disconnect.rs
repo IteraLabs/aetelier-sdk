@@ -302,6 +302,12 @@ pub enum WssExitReason {
     /// No frame of any kind arrived within the staleness deadline — the
     /// socket is presumed half-open (server gone, no Close frame).
     Stale { silence: Duration },
+
+    /// The transport closed the socket itself, ahead of the venue's declared
+    /// session lifetime, so the reconnect happens on our schedule rather than
+    /// mid-frame on the venue's. Classified [`DisconnectReason::CleanClose`]:
+    /// retried immediately, and never counted as a failure.
+    PlannedRotation { lifetime: Duration },
 }
 
 impl fmt::Display for WssExitReason {
@@ -323,6 +329,12 @@ impl fmt::Display for WssExitReason {
             }
             Self::Stale { silence } => {
                 write!(f, "stale connection (no frames for {silence:?})")
+            }
+            Self::PlannedRotation { lifetime } => {
+                write!(
+                    f,
+                    "planned rotation before the {lifetime:?} session lifetime"
+                )
             }
         }
     }
@@ -350,6 +362,7 @@ impl From<WssExitReason> for DisconnectReason {
             WssExitReason::Stale { silence } => DisconnectReason::StaleConnection {
                 silence_duration: silence,
             },
+            WssExitReason::PlannedRotation { .. } => DisconnectReason::CleanClose,
         }
     }
 }

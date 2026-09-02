@@ -49,7 +49,11 @@ pub enum AckOutcome {
     /// The frame acknowledges a successful subscription.
     Accepted,
     /// The venue rejected the subscription (or reported a stream error).
-    Rejected(String),
+    ///
+    /// `code` is the VENUE's own error code where the venue publishes one —
+    /// a different taxonomy from the WebSocket close code carried by
+    /// `DisconnectReason::ProtocolRejection`, which stays untouched.
+    Rejected { code: Option<i64>, reason: String },
     /// Not an ack frame — fall through to control/decode handling.
     NotAck,
 }
@@ -273,6 +277,24 @@ pub trait ProtocolHooks: Send + Sync + 'static {
         _declared: &DeclaredSet,
     ) -> Vec<Message> {
         Vec::new()
+    }
+
+    /// Publication cadence the venue GUARANTEES for `datatype`, if it
+    /// publishes one. `None` — the default, and the case for every
+    /// event-driven stream — means silence is never evidence of a fault and
+    /// the datatype is never marked stale.
+    fn datatype_cadence(
+        &self,
+        _datatype: crate::framework::feed::FeedDatatype,
+    ) -> Option<Duration> {
+        None
+    }
+
+    /// Venue-mandated maximum session length, if the venue publishes one
+    /// (KuCoin's bullet token expires after 24 h). `None` means the venue
+    /// declares no lifetime and the socket is never rotated on a schedule.
+    fn connection_lifetime(&self) -> Option<Duration> {
+        None
     }
 
     fn stale_after(&self) -> Duration {

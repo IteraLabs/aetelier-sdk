@@ -37,7 +37,7 @@ impl std::fmt::Display for FeedId {
 
 /// The market-data type a `Feed` subscribes to. Selects the bound book
 /// (orders → `SourcedOrderbook`, trades → `SourcedTradebook`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum FeedDatatype {
     Orders,
     Trades,
@@ -54,6 +54,11 @@ pub enum FeedState {
     Subscribing,
     /// Streaming; the bound book is Live.
     Live,
+    /// Streaming socket, silent datatype: no event for this
+    /// `(instrument, datatype)` within its venue-declared cadence envelope.
+    /// Datatype-scoped — the connection and every sibling feed stay Live.
+    /// Recovers to `Live` on the next event; never terminal.
+    Stale,
     /// Recovering from a book `Gapped`; re-seed per the recovery action.
     Resubscribing,
     /// The shared venue connection dropped; awaiting re-establishment.
@@ -86,7 +91,8 @@ impl FeedState {
             (self, next),
             (Requested, Subscribing | Draining)
                 | (Subscribing, Live | Resubscribing | Reconnecting | Draining)
-                | (Live, Resubscribing | Reconnecting | Draining)
+                | (Live, Stale | Resubscribing | Reconnecting | Draining)
+                | (Stale, Live | Resubscribing | Reconnecting | Draining)
                 | (Resubscribing, Live | Reconnecting | Draining)
                 | (Reconnecting, Subscribing | Rejected | Failed | Draining)
                 | (Draining, Closed)
@@ -164,6 +170,10 @@ impl Feed {
         self.transition(FeedState::Subscribing);
     }
     /// First data + bound book Live (from Subscribing or Resubscribing).
+    pub fn to_stale(&mut self) {
+        self.transition(FeedState::Stale);
+    }
+
     pub fn to_live(&mut self) {
         self.transition(FeedState::Live);
     }
@@ -276,6 +286,16 @@ impl FeedSet {
         }
     }
 
+    /// No event for `(instrument, datatype)` inside its declared cadence
+    /// envelope, while the socket itself stays live.
+    pub fn mark_stale(&mut self, instrument: &TradingPair, datatype: FeedDatatype) {
+        if let Some(f) = self.get_mut(instrument, datatype)
+            && f.state() == FeedState::Live
+        {
+            f.to_stale();
+        }
+    }
+
     /// The bound book for `(instrument, datatype)` gapped; recovery begins.
     pub fn mark_resubscribing(
         &mut self,
@@ -346,6 +366,83 @@ impl FeedSet {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_live_feed_may_go_stale_and_recover() {
+        assert!(FeedState::Live.can_transition_to(FeedState::Stale));
+        assert!(FeedState::Stale.can_transition_to(FeedState::Live));
+        assert!(!FeedState::Stale.is_terminal());
+    }
+
+    #[test]
+    fn staleness_is_not_reachable_before_data() {
+        assert!(!FeedState::Requested.can_transition_to(FeedState::Stale));
+        assert!(!FeedState::Subscribing.can_transition_to(FeedState::Stale));
+        assert!(!FeedState::Resubscribing.can_transition_to(FeedState::Stale));
+    }
+
+    #[test]
+    fn a_stale_feed_still_reaches_recovery_and_shutdown() {
+        assert!(FeedState::Stale.can_transition_to(FeedState::Resubscribing));
+        assert!(FeedState::Stale.can_transition_to(FeedState::Reconnecting));
+        assert!(FeedState::Stale.can_transition_to(FeedState::Draining));
+    }
+
+    #[test]
+    fn marking_stale_touches_only_the_named_datatype() {
+        let pair = TradingPair::new("BTC", "USDC");
+        let mut set = FeedSet::new(vec![
+            Feed::new(Exchange::Hyperliquid, pair.clone(), FeedDatatype::Orders),
+            Feed::new(
+                Exchange::Hyperliquid,
+                pair.clone(),
+                FeedDatatype::FundingRates,
+            ),
+        ]);
+        set.mark_all_subscribing();
+        set.mark_live(&pair, FeedDatatype::Orders);
+        set.mark_live(&pair, FeedDatatype::FundingRates);
+
+        set.mark_stale(&pair, FeedDatatype::FundingRates);
+
+        assert_eq!(
+            set.get_mut(&pair, FeedDatatype::FundingRates)
+                .unwrap()
+                .state(),
+            FeedState::Stale
+        );
+        assert_eq!(
+            set.get_mut(&pair, FeedDatatype::Orders).unwrap().state(),
+            FeedState::Live,
+            "the socket and its sibling feeds stay live"
+        );
+
+        set.mark_live(&pair, FeedDatatype::FundingRates);
+        assert_eq!(
+            set.get_mut(&pair, FeedDatatype::FundingRates)
+                .unwrap()
+                .state(),
+            FeedState::Live
+        );
+    }
+
+    #[test]
+    fn a_feed_that_never_reached_live_is_never_marked_stale() {
+        let pair = TradingPair::new("BTC", "USDC");
+        let mut set = FeedSet::new(vec![Feed::new(
+            Exchange::Hyperliquid,
+            pair.clone(),
+            FeedDatatype::FundingRates,
+        )]);
+        set.mark_all_subscribing();
+        set.mark_stale(&pair, FeedDatatype::FundingRates);
+        assert_eq!(
+            set.get_mut(&pair, FeedDatatype::FundingRates)
+                .unwrap()
+                .state(),
+            FeedState::Subscribing
+        );
+    }
     use super::*;
 
     #[test]

@@ -33,6 +33,27 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 
 const CLOSE_GRACE: Duration = Duration::from_millis(500);
 
+/// Headroom subtracted from a venue's declared session lifetime to pick the
+/// rotation cut point. Derivation: one full reconnect envelope is the connect
+/// bound plus the close grace; the socket must also re-subscribe and re-seed
+/// before the venue's own deadline, so the envelope is taken twice. Stated as
+/// a multiple rather than a minted number.
+const ROTATION_HEADROOM_MULTIPLE: u32 = 2;
+
+fn rotation_headroom() -> Duration {
+    (CONNECT_TIMEOUT + CLOSE_GRACE) * ROTATION_HEADROOM_MULTIPLE
+}
+
+/// The instant a socket opened at `start` must be rotated, or `None` when the
+/// venue declares no lifetime. A lifetime shorter than the headroom rotates at
+/// the lifetime itself rather than in the past.
+pub(crate) fn rotation_deadline(
+    start: tokio::time::Instant,
+    lifetime: Option<Duration>,
+) -> Option<tokio::time::Instant> {
+    lifetime.map(|l| start + l.saturating_sub(rotation_headroom()).max(Duration::ZERO))
+}
+
 /// Wall-clock now in UTC epoch microseconds (`0` on a clock error) — the
 /// platform timestamp standard. The RTT ping payload
 /// carries the same unit end-to-end.
@@ -298,6 +319,9 @@ impl<H: ProtocolHooks, D: WssDecoder> WssTransport<H, D> {
         // a mid-session stream error (retryable contract-break).
         let mut streamed = false;
         let mut health = HealthMonitor::new(stale_after);
+        let connection_lifetime = self.hooks.connection_lifetime();
+        let rotate_at =
+            rotation_deadline(tokio::time::Instant::now(), connection_lifetime);
 
         loop {
             let msg = tokio::select! {
@@ -308,6 +332,15 @@ impl<H: ProtocolHooks, D: WssDecoder> WssTransport<H, D> {
                 _ = tokio::time::sleep_until(health.deadline()) => {
                     warn!(silence = ?stale_after, "framework.wss.stale");
                     exit = WssExitReason::Stale { silence: stale_after };
+                    break;
+                }
+                _ = elapsed_at(rotate_at), if rotate_at.is_some() => {
+                    let lifetime = connection_lifetime.unwrap_or_default();
+                    info!(?lifetime, "framework.wss.planned_rotation");
+                    let mut w = writer.lock().await;
+                    let _ = w.send(Message::Close(None)).await;
+                    drop(w);
+                    exit = WssExitReason::PlannedRotation { lifetime };
                     break;
                 }
                 _ = shutdown_signaled(&mut shutdown) => {
@@ -419,8 +452,13 @@ impl<H: ProtocolHooks, D: WssDecoder> WssTransport<H, D> {
             // (terminal Rejected); post-data rejection is a broken stream
             // contract — reconnect instead of idling data-less.
             match self.hooks.classify_ack(&text) {
-                AckOutcome::Rejected(reason) => {
-                    error!(%reason, streamed, "framework.wss.subscribe_rejected");
+                AckOutcome::Rejected { code, reason } => {
+                    error!(
+                        venue_code = ?code,
+                        %reason,
+                        streamed,
+                        "framework.wss.subscribe_rejected"
+                    );
                     exit = ack_rejection_exit(streamed, reason);
                     break;
                 }
@@ -477,6 +515,42 @@ impl<H: ProtocolHooks, D: WssDecoder> WssTransport<H, D> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_venue_ack_code_never_becomes_a_websocket_close_code() {
+        use crate::clients::disconnect::DisconnectReason;
+
+        let rejection = AckOutcome::Rejected {
+            code: Some(60012),
+            reason: "Invalid request".into(),
+        };
+        let AckOutcome::Rejected { code, reason } = rejection else {
+            panic!("constructed a rejection");
+        };
+        assert_eq!(code, Some(60012));
+
+        let exit = ack_rejection_exit(false, reason);
+        assert!(matches!(exit, WssExitReason::SubscriptionRejected(_)));
+        match DisconnectReason::from(exit) {
+            DisconnectReason::ProtocolRejection { code, reason } => {
+                assert_eq!(code, 0, "close-code slot stays application-level");
+                assert_eq!(reason, "Invalid request");
+            }
+            other => panic!("expected a protocol rejection, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_post_data_rejection_still_carries_only_the_reason_text() {
+        let exit = ack_rejection_exit(true, "Invalid request".into());
+        match exit {
+            WssExitReason::ConnectionFailed(msg) => {
+                assert!(msg.contains("Invalid request"));
+                assert!(!msg.contains("60012"));
+            }
+            other => panic!("expected a connection failure, got {other:?}"),
+        }
+    }
     use super::*;
     use crate::framework::protocol::DeclaredSet as Prepared_DS;
     use crate::framework::protocol::Prepared;
@@ -670,6 +744,125 @@ mod tests {
             metrics.snapshot().ingest_backpressure > 0,
             "a stalled consumer must surface as backpressure, not silence"
         );
+    }
+
+    struct RotatingHooks {
+        url: String,
+        lifetime: Option<Duration>,
+    }
+
+    impl ProtocolHooks for RotatingHooks {
+        fn endpoint(&self) -> String {
+            self.url.clone()
+        }
+        fn subscribe_frames(
+            &self,
+            _symbols: &[String],
+            _declared: &Prepared_DS,
+        ) -> Vec<Message> {
+            Vec::new()
+        }
+        fn connection_lifetime(&self) -> Option<Duration> {
+            self.lifetime
+        }
+    }
+
+    async fn run_rotation_case(lifetime: Option<Duration>) -> WssExitReason {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            while ws.next().await.is_some() {}
+        });
+
+        let transport = WssTransport::<RotatingHooks, NoopDecoder>::new(
+            Arc::new(RotatingHooks {
+                url: format!("ws://{addr}"),
+                lifetime,
+            }),
+            vec!["TEST".to_string()],
+            Prepared_DS::all(),
+        );
+        let (tx, _rx) = mpsc::channel(8);
+        transport
+            .run_with_deadlines(
+                tx,
+                Arc::new(AtomicU64::new(0)),
+                SourceMetrics::default(),
+                Duration::from_secs(5),
+                Duration::from_secs(30),
+                None,
+            )
+            .await
+    }
+
+    #[test]
+    fn a_declared_lifetime_rotates_before_the_venue_deadline() {
+        let start = tokio::time::Instant::now();
+        let lifetime = Duration::from_secs(24 * 60 * 60);
+        let at = rotation_deadline(start, Some(lifetime)).expect("declared lifetime");
+        assert!(
+            at < start + lifetime,
+            "the cut point must precede the venue deadline"
+        );
+        assert_eq!(at, start + lifetime - rotation_headroom());
+    }
+
+    #[test]
+    fn a_venue_without_a_lifetime_never_rotates() {
+        assert!(rotation_deadline(tokio::time::Instant::now(), None).is_none());
+    }
+
+    #[test]
+    fn a_lifetime_inside_the_headroom_rotates_at_once_rather_than_in_the_past() {
+        let start = tokio::time::Instant::now();
+        let at = rotation_deadline(start, Some(Duration::from_secs(1))).unwrap();
+        assert_eq!(at, start);
+    }
+
+    #[tokio::test]
+    async fn a_planned_rotation_exits_as_such_and_classifies_clean() {
+        use crate::clients::disconnect::DisconnectReason;
+
+        // A lifetime inside the headroom cuts at once, so the case runs on the
+        // real clock; the 24 h cut point is proven by `rotation_deadline`.
+        let exit = run_rotation_case(Some(Duration::from_secs(1))).await;
+        let lifetime = match exit {
+            WssExitReason::PlannedRotation { lifetime } => lifetime,
+            other => panic!("expected a planned rotation, got {other:?}"),
+        };
+        assert_eq!(lifetime, Duration::from_secs(1));
+        assert!(matches!(
+            DisconnectReason::from(WssExitReason::PlannedRotation { lifetime }),
+            DisconnectReason::CleanClose
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_lifetime_free_venue_stays_on_the_socket() {
+        let run = tokio::spawn(run_rotation_case(None));
+        sleep(Duration::from_millis(300)).await;
+        assert!(!run.is_finished(), "no lifetime means no scheduled close");
+        run.abort();
+    }
+
+    #[test]
+    fn a_rotation_neither_backs_off_nor_counts_a_failure() {
+        use crate::clients::disconnect::DisconnectReason;
+        use crate::clients::reconnect::{ReconnectAction, ReconnectPolicy};
+
+        let mut policy = ReconnectPolicy::builder().build();
+        let reason = DisconnectReason::from(WssExitReason::PlannedRotation {
+            lifetime: Duration::from_secs(24 * 60 * 60),
+        });
+        for _ in 0..3 {
+            assert!(matches!(
+                policy.next_action(&reason),
+                ReconnectAction::RetryImmediately
+            ));
+        }
+        assert_eq!(policy.consecutive_failures(), 0);
     }
 
     #[test]

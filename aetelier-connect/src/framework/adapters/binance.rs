@@ -109,12 +109,14 @@ impl ProtocolHooks for BinanceHooks {
             return AckOutcome::NotAck;
         };
         if let Some(err) = obj.get("error") {
-            return AckOutcome::Rejected(
-                err.get("msg")
+            return AckOutcome::Rejected {
+                code: err.get("code").and_then(|c| c.as_i64()),
+                reason: err
+                    .get("msg")
                     .and_then(|m| m.as_str())
                     .unwrap_or("subscribe failed")
                     .to_string(),
-            );
+            };
         }
         if obj.contains_key("result") && obj.contains_key("id") {
             return AckOutcome::Accepted;
@@ -377,7 +379,10 @@ mod tests {
         );
         assert_eq!(
             h.classify_ack(r#"{"error":{"code":2,"msg":"Invalid request"},"id":1}"#),
-            AckOutcome::Rejected("Invalid request".into())
+            AckOutcome::Rejected {
+                code: Some(2),
+                reason: "Invalid request".into(),
+            }
         );
         assert_eq!(
             h.classify_ack(r#"{"e":"trade","s":"BTCUSDT","p":"100.0"}"#),

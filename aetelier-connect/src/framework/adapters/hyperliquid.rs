@@ -111,6 +111,16 @@ impl ProtocolHooks for HyperliquidHooks {
         Duration::from_secs(STALE_AFTER_SECS)
     }
 
+    fn datatype_cadence(
+        &self,
+        datatype: crate::framework::feed::FeedDatatype,
+    ) -> Option<std::time::Duration> {
+        match datatype {
+            crate::framework::feed::FeedDatatype::FundingRates => Some(FUNDING_CADENCE),
+            _ => None,
+        }
+    }
+
     fn classify_ack(&self, text: &str) -> AckOutcome {
         if !text.contains("\"subscriptionResponse\"") && !text.contains("\"error\"") {
             return AckOutcome::NotAck;
@@ -125,12 +135,14 @@ impl ProtocolHooks for HyperliquidHooks {
                     _ => AckOutcome::NotAck,
                 }
             }
-            Some("error") => AckOutcome::Rejected(
-                v.get("data")
+            Some("error") => AckOutcome::Rejected {
+                code: None,
+                reason: v
+                    .get("data")
                     .and_then(|d| d.as_str())
                     .unwrap_or("subscribe failed")
                     .to_string(),
-            ),
+            },
             _ => AckOutcome::NotAck,
         }
     }
@@ -355,6 +367,12 @@ const SETTLEMENT_FETCH_DELAY_SECS: u64 = 5;
 
 const SETTLEMENT_BACKFILL_MS: u64 = 3600 * 1000;
 
+/// Hyperliquid settles funding every hour, so a funding event is guaranteed
+/// within the hour; the `activeAssetCtx` stream carrying it publishes more
+/// often. Open interest rides the same channel with no published guarantee,
+/// so it declares nothing.
+const FUNDING_CADENCE: std::time::Duration = std::time::Duration::from_secs(3600);
+
 const SETTLEMENT_OVERLAP_MS: u64 = 3600 * 1000;
 
 fn now_us() -> u64 {
@@ -541,6 +559,16 @@ impl ExchangeAdapter for HyperliquidAdapter {
 
     fn resubscribe_replays_trades(&self) -> bool {
         true
+    }
+
+    fn datatype_cadence(
+        &self,
+        datatype: crate::framework::feed::FeedDatatype,
+    ) -> Option<std::time::Duration> {
+        match datatype {
+            crate::framework::feed::FeedDatatype::FundingRates => Some(FUNDING_CADENCE),
+            _ => None,
+        }
     }
 
     fn max_declared_depth(&self) -> Option<usize> {
@@ -784,7 +812,7 @@ mod tests {
     fn classify_ack_rejects_error_channel_with_reason() {
         let frame = r#"{"channel":"error","data":"Error parsing JSON into valid websocket request: {}"}"#;
         match HyperliquidHooks::default().classify_ack(frame) {
-            AckOutcome::Rejected(reason) => {
+            AckOutcome::Rejected { reason, .. } => {
                 assert!(reason.contains("Error parsing JSON"), "{reason}");
             }
             other => panic!("expected Rejected, got {other:?}"),
