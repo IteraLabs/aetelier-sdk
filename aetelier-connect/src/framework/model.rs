@@ -47,7 +47,7 @@ impl DomainEvent {
         local_us: u64,
         rtt_us: u64,
         recv_seq: u64,
-        conn_epoch: u32,
+        conn_epoch_us: u64,
     ) {
         match self {
             DomainEvent::Book(d) => {
@@ -61,12 +61,12 @@ impl DomainEvent {
             DomainEvent::FundingRate(fr) => {
                 fr.local_funding_ts_us = local_us;
                 fr.recv_seq = recv_seq;
-                fr.conn_epoch = conn_epoch;
+                fr.conn_epoch_us = conn_epoch_us;
             }
             DomainEvent::OpenInterest(oi) => {
                 oi.local_oi_ts_us = local_us;
                 oi.recv_seq = recv_seq;
-                oi.conn_epoch = conn_epoch;
+                oi.conn_epoch_us = conn_epoch_us;
             }
             DomainEvent::FundingSettlement(fs) => {
                 if fs.local_ts_us == 0 {
@@ -1442,7 +1442,7 @@ mod tests {
     }
 
     #[test]
-    fn stamp_local_carries_conn_epoch_into_derivative_rows() {
+    fn stamp_local_carries_conn_epoch_us_into_derivative_rows() {
         use aetelier_types::funding::FundingRate;
         use aetelier_types::open_interest::OpenInterest;
         use aetelier_types::trading_pair::TradingPair;
@@ -1451,7 +1451,7 @@ mod tests {
             funding_rate_ts_us: 1,
             local_funding_ts_us: 0,
             recv_seq: 0,
-            conn_epoch: 0,
+            conn_epoch_us: 0,
             pair: TradingPair::new("BTC", "USDC"),
             funding_rate: "0.0001".parse().unwrap(),
             premium: None,
@@ -1459,10 +1459,10 @@ mod tests {
             next_funding_ts_us: 0,
             exchange: "hyperliquid".to_string(),
         });
-        funding.stamp_local(42, 7, 3, 1_800_000_001);
+        funding.stamp_local(42, 7, 3, 1_788_375_005_000_000);
         match &funding {
             DomainEvent::FundingRate(fr) => {
-                assert_eq!(fr.conn_epoch, 1_800_000_001);
+                assert_eq!(fr.conn_epoch_us, 1_788_375_005_000_000);
                 assert_eq!(fr.recv_seq, 3);
                 assert_eq!(fr.local_funding_ts_us, 42);
             }
@@ -1473,17 +1473,17 @@ mod tests {
             open_interest_ts_us: 1,
             local_oi_ts_us: 0,
             recv_seq: 0,
-            conn_epoch: 0,
+            conn_epoch_us: 0,
             pair: TradingPair::new("BTC", "USDC"),
             open_interest: "10".parse().unwrap(),
             open_interest_value: None,
             mark_px: None,
             exchange: "hyperliquid".to_string(),
         });
-        oi.stamp_local(43, 7, 4, 1_800_000_002);
+        oi.stamp_local(43, 7, 4, 1_788_375_198_000_000);
         match &oi {
             DomainEvent::OpenInterest(o) => {
-                assert_eq!(o.conn_epoch, 1_800_000_002);
+                assert_eq!(o.conn_epoch_us, 1_788_375_198_000_000);
                 assert_eq!(o.recv_seq, 4);
             }
             other => panic!("wrong variant: {other:?}"),

@@ -78,7 +78,7 @@ use aetelier_types::config::markets::market_config::{DeclaredDatatype, DeclaredS
 
 /// Archive replay opens no socket, so its rows carry the unset epoch rather
 /// than borrowing a live connection's identity.
-const ARCHIVE_CONN_EPOCH: u32 = 0;
+const ARCHIVE_CONN_EPOCH_US: u64 = 0;
 
 pub struct DecodedLine {
     pub events: Vec<DomainEvent>,
@@ -476,7 +476,7 @@ async fn emit_ctx_rows(
                         funding_rate_ts_us: ts_us,
                         local_funding_ts_us: 0,
                         recv_seq: 0,
-                        conn_epoch: 0,
+                        conn_epoch_us: 0,
                         pair: pair.clone(),
                         funding_rate: rate,
                         premium: cols[6].parse().ok(),
@@ -498,7 +498,7 @@ async fn emit_ctx_rows(
                         open_interest_ts_us: ts_us,
                         local_oi_ts_us: 0,
                         recv_seq: 0,
-                        conn_epoch: 0,
+                        conn_epoch_us: 0,
                         pair: pair.clone(),
                         open_interest: oi,
                         open_interest_value: None,
@@ -514,7 +514,7 @@ async fn emit_ctx_rows(
         }
         for mut event in events {
             *recv_seq += 1;
-            event.stamp_local(ts_us, 0, *recv_seq, ARCHIVE_CONN_EPOCH);
+            event.stamp_local(ts_us, 0, *recv_seq, ARCHIVE_CONN_EPOCH_US);
             metrics.bump_msgs();
             if tx.send(event).await.is_err() {
                 return Err(());
@@ -772,7 +772,7 @@ impl ExchangeAdapter for HyperliquidEntrepotAdapter {
                                         local,
                                         0,
                                         recv_seq,
-                                        ARCHIVE_CONN_EPOCH,
+                                        ARCHIVE_CONN_EPOCH_US,
                                     );
                                     metrics.bump_msgs();
                                     if tx.send(event).await.is_err() {

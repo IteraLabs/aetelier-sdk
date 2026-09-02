@@ -3,7 +3,7 @@
 //! `ExchangeAdapter::spawn` and the venue profile.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 /// One rate-limit window (e.g. 5 requests per 1s).
@@ -61,7 +61,7 @@ pub struct SourceMetrics {
 
 #[derive(Debug, Default)]
 struct SourceMetricsInner {
-    conn_epoch: AtomicU32,
+    conn_epoch_us: AtomicU64,
     msgs: AtomicU64,
     decode_err: AtomicU64,
     dropped_frames: AtomicU64,
@@ -206,19 +206,25 @@ pub struct SourceMetricsSnapshot {
 }
 
 impl SourceMetrics {
-    /// Mint the identity of a newly opened socket for this source: Unix
-    /// seconds, guarded so a same-second reconnect still advances
-    /// (`max(now, last + 1)`). Held on the shared handle, so it survives the
-    /// per-connection `drive()` task and is monotonic for the feed's lifetime.
-    pub fn next_conn_epoch(&self) -> u32 {
+    /// Mint the identity of a socket that has just CONNECTED: Unix
+    /// microseconds, the platform timestamp unit. Called by the transport at
+    /// the moment the handshake completes, so the value is when the socket
+    /// opened — not when a connect was attempted.
+    ///
+    /// Guarded monotonic per feed (`max(now, last + 1)`): at microsecond
+    /// resolution two connects cannot realistically share an instant, so the
+    /// guard is insurance against a clock stepping backwards (NTP), not a
+    /// granularity patch. Held on the shared handle, so it outlives the
+    /// per-connection task and stays monotonic for the feed's lifetime.
+    pub fn next_conn_epoch_us(&self) -> u64 {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
-            .as_secs() as u32;
-        let mut prev = self.inner.conn_epoch.load(Ordering::Relaxed);
+            .as_micros() as u64;
+        let mut prev = self.inner.conn_epoch_us.load(Ordering::Relaxed);
         loop {
             let next = now.max(prev.saturating_add(1));
-            match self.inner.conn_epoch.compare_exchange_weak(
+            match self.inner.conn_epoch_us.compare_exchange_weak(
                 prev,
                 next,
                 Ordering::AcqRel,
@@ -231,9 +237,9 @@ impl SourceMetrics {
     }
 
     /// The identity of the socket currently open on this source; `0` before
-    /// the first connect.
-    pub fn conn_epoch(&self) -> u32 {
-        self.inner.conn_epoch.load(Ordering::Relaxed)
+    /// the first connect completes.
+    pub fn conn_epoch_us(&self) -> u64 {
+        self.inner.conn_epoch_us.load(Ordering::Relaxed)
     }
 
     /// One decoded wire frame reached the normalizer.
@@ -430,41 +436,41 @@ impl SourceMetrics {
 mod tests {
 
     #[test]
-    fn conn_epoch_advances_when_two_sockets_open_in_the_same_second() {
+    fn conn_epoch_us_advances_when_two_sockets_open_in_the_same_instant() {
         let m = SourceMetrics::default();
-        let first = m.next_conn_epoch();
-        let second = m.next_conn_epoch();
-        let third = m.next_conn_epoch();
+        let first = m.next_conn_epoch_us();
+        let second = m.next_conn_epoch_us();
+        let third = m.next_conn_epoch_us();
         assert!(second > first, "{second} must exceed {first}");
         assert!(third > second, "{third} must exceed {second}");
     }
 
     #[test]
-    fn conn_epoch_is_unset_before_the_first_connect() {
+    fn conn_epoch_us_is_unset_before_the_first_connect() {
         let m = SourceMetrics::default();
-        assert_eq!(m.conn_epoch(), 0);
-        let minted = m.next_conn_epoch();
-        assert_eq!(m.conn_epoch(), minted);
+        assert_eq!(m.conn_epoch_us(), 0);
+        let minted = m.next_conn_epoch_us();
+        assert_eq!(m.conn_epoch_us(), minted);
     }
 
     #[test]
-    fn conn_epoch_starts_from_wall_clock_seconds() {
+    fn conn_epoch_us_starts_from_wall_clock_micros() {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
-            .as_secs() as u32;
-        let minted = SourceMetrics::default().next_conn_epoch();
+            .as_micros() as u64;
+        let minted = SourceMetrics::default().next_conn_epoch_us();
         assert!(minted >= now, "{minted} must be at or after {now}");
     }
 
     #[test]
-    fn conn_epoch_clones_share_one_identity() {
+    fn conn_epoch_us_clones_share_one_identity() {
         let m = SourceMetrics::default();
         let clone = m.clone();
-        let first = m.next_conn_epoch();
-        let second = clone.next_conn_epoch();
+        let first = m.next_conn_epoch_us();
+        let second = clone.next_conn_epoch_us();
         assert!(second > first);
-        assert_eq!(m.conn_epoch(), second);
+        assert_eq!(m.conn_epoch_us(), second);
     }
     use super::*;
 

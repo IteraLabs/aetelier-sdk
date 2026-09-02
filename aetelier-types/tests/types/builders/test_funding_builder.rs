@@ -50,7 +50,7 @@ mod tests {
         let fr = FundingRate::builder()
             .local_funding_ts_us(1_700_000_000_000_000)
             .recv_seq(42)
-            .conn_epoch(2)
+            .conn_epoch_us(2)
             .pair(TradingPair::new("BTC", "USDC"))
             .funding_rate(d("0.0000125"))
             .premium(d("0.00001"))
@@ -62,7 +62,7 @@ mod tests {
         assert_eq!(fr.funding_rate_ts_us, 0);
         assert_eq!(fr.effective_ts_us(), 1_700_000_000_000_000);
         assert_eq!(fr.recv_seq, 42);
-        assert_eq!(fr.conn_epoch, 2);
+        assert_eq!(fr.conn_epoch_us, 2);
         assert_eq!(fr.premium, Some(d("0.00001")));
         assert_eq!(fr.interval_hours, 1);
     }

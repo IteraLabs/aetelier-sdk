@@ -20,7 +20,7 @@ mod tests {
                 funding_rate_ts_us: 1_672_304_484_000_000,
                 local_funding_ts_us: 1_672_304_484_015_000,
                 recv_seq: 10,
-                conn_epoch: 1,
+                conn_epoch_us: 1,
                 pair: pair.clone(),
                 funding_rate: d("0.0001"),
                 premium: Some(d("0.00002")),
@@ -32,7 +32,7 @@ mod tests {
                 funding_rate_ts_us: 0,
                 local_funding_ts_us: 1_672_308_000_030_000,
                 recv_seq: 11,
-                conn_epoch: 2,
+                conn_epoch_us: 2,
                 pair: pair.clone(),
                 funding_rate: d("-0.00015"),
                 premium: None,
@@ -56,7 +56,7 @@ mod tests {
         assert_eq!(loaded[0].funding_rate_ts_us, 1_672_304_484_000_000);
         assert_eq!(loaded[0].local_funding_ts_us, 1_672_304_484_015_000);
         assert_eq!(loaded[0].recv_seq, 10);
-        assert_eq!(loaded[0].conn_epoch, 1);
+        assert_eq!(loaded[0].conn_epoch_us, 1);
         assert_eq!(loaded[0].funding_rate, d("0.0001"));
         assert_eq!(loaded[0].premium, Some(d("0.00002")));
         assert_eq!(loaded[0].interval_hours, 8);
@@ -129,7 +129,7 @@ mod tests {
         assert_eq!(loaded[0].funding_rate, d("0.0001"));
         assert_eq!(loaded[0].local_funding_ts_us, 0);
         assert_eq!(loaded[0].recv_seq, 0);
-        assert_eq!(loaded[0].conn_epoch, 0);
+        assert_eq!(loaded[0].conn_epoch_us, 0);
         assert_eq!(loaded[0].premium, None);
         assert_eq!(loaded[0].interval_hours, 8);
     }
@@ -144,7 +144,7 @@ mod tests {
                 funding_rate_ts_us: i * 1_000_000,
                 local_funding_ts_us: i * 1_000_000 + 7,
                 recv_seq: i,
-                conn_epoch: 1,
+                conn_epoch_us: 1,
                 pair: TradingPair::new("BTC", "USDT"),
                 funding_rate: d("0.0001"),
                 premium: None,

@@ -12,7 +12,7 @@ pub fn write_oi_parquet(
     path: &Path,
 ) -> Result<(), PersistError> {
     use arrow::{
-        array::{Float64Array, StringArray, UInt32Array, UInt64Array},
+        array::{Float64Array, StringArray, UInt64Array},
         datatypes::{DataType, Field, Schema},
         record_batch::RecordBatch,
     };
@@ -30,7 +30,7 @@ pub fn write_oi_parquet(
     let mut exchanges: Vec<&str> = Vec::with_capacity(n);
     let mut local_timestamps = Vec::with_capacity(n);
     let mut recv_seqs = Vec::with_capacity(n);
-    let mut conn_epochs = Vec::with_capacity(n);
+    let mut conn_epochs_us = Vec::with_capacity(n);
     let mut mark_pxs: Vec<Option<f64>> = Vec::with_capacity(n);
 
     for oi in records {
@@ -41,7 +41,7 @@ pub fn write_oi_parquet(
         exchanges.push(&oi.exchange);
         local_timestamps.push(oi.local_oi_ts_us);
         recv_seqs.push(oi.recv_seq);
-        conn_epochs.push(oi.conn_epoch);
+        conn_epochs_us.push(oi.conn_epoch_us);
         mark_pxs.push(oi.mark_px.map(decimal_to_f64));
     }
 
@@ -53,7 +53,7 @@ pub fn write_oi_parquet(
         Field::new("exchange", DataType::Utf8, false),
         Field::new("local_oi_ts_us", DataType::UInt64, false),
         Field::new("recv_seq", DataType::UInt64, false),
-        Field::new("conn_epoch", DataType::UInt32, false),
+        Field::new("conn_epoch_us", DataType::UInt64, false),
         Field::new("mark_px", DataType::Float64, true),
     ]);
 
@@ -68,7 +68,7 @@ pub fn write_oi_parquet(
             Arc::new(StringArray::from(exchanges)),
             Arc::new(UInt64Array::from(local_timestamps)),
             Arc::new(UInt64Array::from(recv_seqs)),
-            Arc::new(UInt32Array::from(conn_epochs)),
+            Arc::new(UInt64Array::from(conn_epochs_us)),
             Arc::new(Float64Array::from(mark_pxs)),
         ],
     )
@@ -128,23 +128,20 @@ pub fn read_oi_parquet(path: &Path) -> Result<Vec<OpenInterest>, PersistError> {
         let exchanges = batch.column(4).as_string::<i32>();
 
         for i in 0..batch.num_rows() {
-            let (local_ts, recv_seq, conn_epoch, mark_px) = if extended {
+            let (local_ts, recv_seq, conn_epoch_us, mark_px) = if extended {
                 let locals = batch
                     .column(5)
                     .as_primitive::<arrow::datatypes::UInt64Type>();
                 let seqs = batch
                     .column(6)
                     .as_primitive::<arrow::datatypes::UInt64Type>();
-                let epochs = batch
-                    .column(7)
-                    .as_primitive::<arrow::datatypes::UInt32Type>();
                 let marks = batch
                     .column(8)
                     .as_primitive::<arrow::datatypes::Float64Type>();
                 (
                     locals.value(i),
                     seqs.value(i),
-                    epochs.value(i),
+                    crate::funding::funding_parquet::conn_epoch_us_at(&batch, 7, i),
                     marks.is_valid(i).then(|| f64_to_decimal(marks.value(i))),
                 )
             } else {
@@ -154,7 +151,7 @@ pub fn read_oi_parquet(path: &Path) -> Result<Vec<OpenInterest>, PersistError> {
                 open_interest_ts_us: timestamps.value(i),
                 local_oi_ts_us: local_ts,
                 recv_seq,
-                conn_epoch,
+                conn_epoch_us,
                 pair: symbols.value(i).parse::<TradingPair>().map_err(|_| {
                     PersistError::Parse(format!(
                         "row {i}: malformed symbol '{}' in {}",
