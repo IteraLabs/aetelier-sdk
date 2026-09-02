@@ -47,7 +47,7 @@ mod tests {
         let oi = OpenInterest::builder()
             .local_oi_ts_us(1_700_000_000_000_000)
             .recv_seq(7)
-            .conn_epoch(1)
+            .conn_epoch_us(1)
             .pair(TradingPair::new("BTC", "USDC"))
             .open_interest(d("12345.678"))
             .mark_px(d("50000.5"))
@@ -58,7 +58,7 @@ mod tests {
         assert_eq!(oi.open_interest_ts_us, 0);
         assert_eq!(oi.effective_ts_us(), 1_700_000_000_000_000);
         assert_eq!(oi.recv_seq, 7);
-        assert_eq!(oi.conn_epoch, 1);
+        assert_eq!(oi.conn_epoch_us, 1);
         assert_eq!(oi.mark_px, Some(d("50000.5")));
         assert_eq!(oi.open_interest_value, None);
     }

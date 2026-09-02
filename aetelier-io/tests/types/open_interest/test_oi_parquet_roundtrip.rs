@@ -20,7 +20,7 @@ mod tests {
                 open_interest_ts_us: 1_672_304_484_000_000,
                 local_oi_ts_us: 1_672_304_484_010_000,
                 recv_seq: 1,
-                conn_epoch: 1,
+                conn_epoch_us: 1,
                 pair: pair.clone(),
                 open_interest: d("32000.5"),
                 open_interest_value: Some(d("752000000")),
@@ -31,7 +31,7 @@ mod tests {
                 open_interest_ts_us: 0,
                 local_oi_ts_us: 1_672_304_784_020_000,
                 recv_seq: 2,
-                conn_epoch: 1,
+                conn_epoch_us: 1,
                 pair: pair.clone(),
                 open_interest: d("32100"),
                 open_interest_value: None,
@@ -54,7 +54,7 @@ mod tests {
         assert_eq!(loaded[0].open_interest_ts_us, 1_672_304_484_000_000);
         assert_eq!(loaded[0].local_oi_ts_us, 1_672_304_484_010_000);
         assert_eq!(loaded[0].recv_seq, 1);
-        assert_eq!(loaded[0].conn_epoch, 1);
+        assert_eq!(loaded[0].conn_epoch_us, 1);
         assert_eq!(loaded[0].open_interest, d("32000.5"));
         assert_eq!(loaded[0].open_interest_value, Some(d("752000000")));
         assert_eq!(loaded[0].mark_px, Some(d("23500.25")));
@@ -93,7 +93,7 @@ mod tests {
                 open_interest_ts_us: i * 1_000_000,
                 local_oi_ts_us: i * 1_000_000 + 5,
                 recv_seq: i,
-                conn_epoch: 1,
+                conn_epoch_us: 1,
                 pair: TradingPair::new("BTC", "USDT"),
                 open_interest: d("100") * Decimal::from(i),
                 open_interest_value: None,
@@ -160,7 +160,7 @@ mod tests {
         assert_eq!(loaded[0].open_interest_value, Some(d("752000000")));
         assert_eq!(loaded[0].local_oi_ts_us, 0);
         assert_eq!(loaded[0].recv_seq, 0);
-        assert_eq!(loaded[0].conn_epoch, 0);
+        assert_eq!(loaded[0].conn_epoch_us, 0);
         assert_eq!(loaded[0].mark_px, None);
     }
 

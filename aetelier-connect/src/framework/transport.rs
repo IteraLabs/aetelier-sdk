@@ -202,7 +202,16 @@ impl<H: ProtocolHooks, D: WssDecoder> WssTransport<H, D> {
                 ));
             }
         };
-        info!(endpoint = %endpoint, "framework.wss.connected");
+        // The socket is OPEN: mint this connection's identity here, so the
+        // epoch stamped on every row is when the handshake completed — not
+        // when a connect was attempted. Rows leaving the driver read it back
+        // off the shared metrics handle.
+        let conn_epoch_us = metrics.next_conn_epoch_us();
+        info!(
+            endpoint = %endpoint,
+            conn_epoch_us,
+            "framework.wss.connected"
+        );
 
         let (writer_half, mut reader) = ws_stream.split();
         let writer = Arc::new(Mutex::new(writer_half));

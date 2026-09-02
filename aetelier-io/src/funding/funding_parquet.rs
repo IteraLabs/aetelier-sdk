@@ -7,6 +7,28 @@ use aetelier_types::trading_pair::TradingPair;
 use std::path::Path;
 
 #[cfg(feature = "parquet")]
+/// Read the connection-epoch column, tolerating the pre-microsecond archive.
+///
+/// New files carry `conn_epoch_us` as `UInt64` (Unix microseconds). Files
+/// written before the widen carry a `UInt32` `conn_epoch` at the same ordinal,
+/// in seconds and — nothing ever assigned it — always zero. Those read as `0`
+/// rather than being widened, so a seconds magnitude can never be mistaken for
+/// a microsecond instant.
+pub(crate) fn conn_epoch_us_at(
+    batch: &arrow::record_batch::RecordBatch,
+    ordinal: usize,
+    i: usize,
+) -> u64 {
+    use arrow::array::AsArray;
+    let col = batch.column(ordinal);
+    match col.data_type() {
+        arrow::datatypes::DataType::UInt64 => {
+            col.as_primitive::<arrow::datatypes::UInt64Type>().value(i)
+        }
+        _ => 0,
+    }
+}
+
 pub fn write_funding_parquet(
     rates: &[FundingRate],
     path: &Path,
@@ -30,7 +52,7 @@ pub fn write_funding_parquet(
     let mut exchanges: Vec<&str> = Vec::with_capacity(n);
     let mut local_timestamps = Vec::with_capacity(n);
     let mut recv_seqs = Vec::with_capacity(n);
-    let mut conn_epochs = Vec::with_capacity(n);
+    let mut conn_epochs_us = Vec::with_capacity(n);
     let mut premiums: Vec<Option<f64>> = Vec::with_capacity(n);
     let mut intervals = Vec::with_capacity(n);
 
@@ -42,7 +64,7 @@ pub fn write_funding_parquet(
         exchanges.push(&fr.exchange);
         local_timestamps.push(fr.local_funding_ts_us);
         recv_seqs.push(fr.recv_seq);
-        conn_epochs.push(fr.conn_epoch);
+        conn_epochs_us.push(fr.conn_epoch_us);
         premiums.push(fr.premium.map(decimal_to_f64));
         intervals.push(fr.interval_hours);
     }
@@ -55,7 +77,7 @@ pub fn write_funding_parquet(
         Field::new("exchange", DataType::Utf8, false),
         Field::new("local_funding_ts_us", DataType::UInt64, false),
         Field::new("recv_seq", DataType::UInt64, false),
-        Field::new("conn_epoch", DataType::UInt32, false),
+        Field::new("conn_epoch_us", DataType::UInt64, false),
         Field::new("premium", DataType::Float64, true),
         Field::new("interval_hours", DataType::UInt32, false),
     ]);
@@ -71,7 +93,7 @@ pub fn write_funding_parquet(
             Arc::new(StringArray::from(exchanges)),
             Arc::new(UInt64Array::from(local_timestamps)),
             Arc::new(UInt64Array::from(recv_seqs)),
-            Arc::new(UInt32Array::from(conn_epochs)),
+            Arc::new(UInt64Array::from(conn_epochs_us)),
             Arc::new(Float64Array::from(premiums)),
             Arc::new(UInt32Array::from(intervals)),
         ],
@@ -132,16 +154,14 @@ pub fn read_funding_parquet(path: &Path) -> Result<Vec<FundingRate>, PersistErro
         let exchanges = batch.column(4).as_string::<i32>();
 
         for i in 0..batch.num_rows() {
-            let (local_ts, recv_seq, conn_epoch, premium, interval_hours) = if extended {
+            let (local_ts, recv_seq, conn_epoch_us, premium, interval_hours) = if extended
+            {
                 let locals = batch
                     .column(5)
                     .as_primitive::<arrow::datatypes::UInt64Type>();
                 let seqs = batch
                     .column(6)
                     .as_primitive::<arrow::datatypes::UInt64Type>();
-                let epochs = batch
-                    .column(7)
-                    .as_primitive::<arrow::datatypes::UInt32Type>();
                 let premiums = batch
                     .column(8)
                     .as_primitive::<arrow::datatypes::Float64Type>();
@@ -151,7 +171,7 @@ pub fn read_funding_parquet(path: &Path) -> Result<Vec<FundingRate>, PersistErro
                 (
                     locals.value(i),
                     seqs.value(i),
-                    epochs.value(i),
+                    conn_epoch_us_at(&batch, 7, i),
                     premiums
                         .is_valid(i)
                         .then(|| f64_to_decimal(premiums.value(i))),
@@ -164,7 +184,7 @@ pub fn read_funding_parquet(path: &Path) -> Result<Vec<FundingRate>, PersistErro
                 funding_rate_ts_us: timestamps.value(i),
                 local_funding_ts_us: local_ts,
                 recv_seq,
-                conn_epoch,
+                conn_epoch_us,
                 pair: symbols.value(i).parse::<TradingPair>().map_err(|_| {
                     PersistError::Parse(format!(
                         "row {i}: malformed symbol '{}' in {}",
@@ -240,7 +260,7 @@ mod tests {
             funding_rate_ts_us: 1_786_399_200_000_000,
             local_funding_ts_us: 1_786_399_200_000_000,
             recv_seq: 1,
-            conn_epoch: 0,
+            conn_epoch_us: 0,
             pair: aetelier_types::trading_pair::TradingPair::new("xyz:TSLA", "USDC"),
             funding_rate: rust_decimal::Decimal::new(-894, 10),
             premium: None,
