@@ -12,7 +12,7 @@ pub struct FundingRate {
     #[serde(default)]
     pub recv_seq: u64,
     #[serde(default)]
-    pub conn_epoch: u32,
+    pub conn_epoch_us: u64,
     pub pair: TradingPair,
     pub funding_rate: Decimal,
     #[serde(default)]
@@ -41,7 +41,7 @@ pub struct FundingRateBuilder {
     funding_rate_ts_us: Option<u64>,
     local_funding_ts_us: Option<u64>,
     recv_seq: Option<u64>,
-    conn_epoch: Option<u32>,
+    conn_epoch_us: Option<u64>,
     pair: Option<TradingPair>,
     funding_rate: Option<Decimal>,
     premium: Option<Decimal>,
@@ -70,8 +70,8 @@ impl FundingRateBuilder {
         self
     }
 
-    pub fn conn_epoch(mut self, conn_epoch: u32) -> Self {
-        self.conn_epoch = Some(conn_epoch);
+    pub fn conn_epoch_us(mut self, conn_epoch_us: u64) -> Self {
+        self.conn_epoch_us = Some(conn_epoch_us);
         self
     }
 
@@ -127,7 +127,7 @@ impl FundingRateBuilder {
             funding_rate_ts_us,
             local_funding_ts_us,
             recv_seq: self.recv_seq.unwrap_or(0),
-            conn_epoch: self.conn_epoch.unwrap_or(0),
+            conn_epoch_us: self.conn_epoch_us.unwrap_or(0),
             pair,
             funding_rate,
             premium: self.premium,

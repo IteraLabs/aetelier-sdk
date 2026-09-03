@@ -36,3 +36,51 @@ pub mod kucoin;
 pub mod okx;
 pub mod poloniex;
 pub mod upbit;
+
+#[cfg(test)]
+mod ack_code_tests {
+    use super::{binance::BinanceHooks, bybit::BybitHooks, okx::OkxHooks};
+    use crate::framework::protocol::{AckOutcome, ProtocolHooks};
+
+    fn code_of(outcome: AckOutcome) -> Option<i64> {
+        match outcome {
+            AckOutcome::Rejected { code, .. } => code,
+            other => panic!("expected a rejection, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn venue_codes_are_extracted_only_where_the_venue_publishes_one() {
+        let okx = OkxHooks
+            .classify_ack(r#"{"event":"error","code":"60012","msg":"Invalid request"}"#);
+        assert_eq!(code_of(okx), Some(60012), "okx publishes a string code");
+
+        let binance = BinanceHooks
+            .classify_ack(r#"{"error":{"code":-1121,"msg":"Invalid symbol"},"id":1}"#);
+        assert_eq!(
+            code_of(binance),
+            Some(-1121),
+            "binance publishes a numeric code"
+        );
+
+        let bybit = BybitHooks
+            .classify_ack(r#"{"success":false,"ret_msg":"bad topic","op":"subscribe"}"#);
+        assert_eq!(code_of(bybit), None, "bybit v5 subscribe carries no code");
+    }
+
+    #[test]
+    fn a_missing_code_field_never_fabricates_one() {
+        let okx = OkxHooks.classify_ack(r#"{"event":"error","msg":"no code here"}"#);
+        assert_eq!(code_of(okx), None);
+
+        let binance =
+            BinanceHooks.classify_ack(r#"{"error":{"msg":"no code here"},"id":1}"#);
+        assert_eq!(code_of(binance), None);
+    }
+
+    #[test]
+    fn an_unparseable_venue_code_is_absent_rather_than_guessed() {
+        let okx = OkxHooks.classify_ack(r#"{"event":"error","code":"E12","msg":"x"}"#);
+        assert_eq!(code_of(okx), None);
+    }
+}

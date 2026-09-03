@@ -96,12 +96,17 @@ impl ProtocolHooks for OkxHooks {
         };
         match v.get("event").and_then(|e| e.as_str()) {
             Some("subscribe") => AckOutcome::Accepted,
-            Some("error") => AckOutcome::Rejected(
-                v.get("msg")
+            Some("error") => AckOutcome::Rejected {
+                code: v
+                    .get("code")
+                    .and_then(|c| c.as_str())
+                    .and_then(|c| c.parse::<i64>().ok()),
+                reason: v
+                    .get("msg")
                     .and_then(|m| m.as_str())
                     .unwrap_or("stream error")
                     .to_string(),
-            ),
+            },
             _ => AckOutcome::NotAck,
         }
     }
@@ -334,7 +339,10 @@ mod tests {
         );
         assert_eq!(
             h.classify_ack(r#"{"event":"error","code":"60012","msg":"Invalid request"}"#),
-            AckOutcome::Rejected("Invalid request".into())
+            AckOutcome::Rejected {
+                code: Some(60012),
+                reason: "Invalid request".into(),
+            }
         );
         assert_eq!(
             h.classify_ack(

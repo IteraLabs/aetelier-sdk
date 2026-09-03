@@ -98,6 +98,16 @@ pub trait ExchangeAdapter: Send + Sync + 'static {
     /// task's terminal transition.
     ///
     /// `tx` is the in-process Ingest→Sync buffer.
+    /// Venue-guaranteed publication cadence for `datatype`, mirroring the
+    /// same declaration the transport reads off `ProtocolHooks`. `None` means
+    /// the venue guarantees nothing and the datatype is never judged silent.
+    fn datatype_cadence(
+        &self,
+        _datatype: crate::framework::feed::FeedDatatype,
+    ) -> Option<std::time::Duration> {
+        None
+    }
+
     fn spawn(
         &self,
         symbols: Vec<String>,

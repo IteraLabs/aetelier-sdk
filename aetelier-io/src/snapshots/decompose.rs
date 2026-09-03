@@ -19,8 +19,8 @@ pub struct DecomposedSnapshots {
 
 pub fn decompose_snapshots(snapshots: &[MarketSnapshot]) -> DecomposedSnapshots {
     let mut out = DecomposedSnapshots::default();
-    let mut seen_fr: HashSet<(String, String, u32, u64)> = HashSet::new();
-    let mut seen_oi: HashSet<(String, String, u32, u64)> = HashSet::new();
+    let mut seen_fr: HashSet<(String, String, u64, u64)> = HashSet::new();
+    let mut seen_oi: HashSet<(String, String, u64, u64)> = HashSet::new();
     let mut seen_fs: HashSet<(String, String, u64)> = HashSet::new();
 
     for snap in snapshots {
@@ -35,7 +35,7 @@ pub fn decompose_snapshots(snapshots: &[MarketSnapshot]) -> DecomposedSnapshots 
                 || seen_fr.insert((
                     fr.exchange.clone(),
                     fr.pair.to_canonical(),
-                    fr.conn_epoch,
+                    fr.conn_epoch_us,
                     fr.recv_seq,
                 ))
             {
@@ -48,7 +48,7 @@ pub fn decompose_snapshots(snapshots: &[MarketSnapshot]) -> DecomposedSnapshots 
                 || seen_oi.insert((
                     oi.exchange.clone(),
                     oi.pair.to_canonical(),
-                    oi.conn_epoch,
+                    oi.conn_epoch_us,
                     oi.recv_seq,
                 ))
             {
@@ -78,12 +78,19 @@ mod tests {
         s.parse().unwrap()
     }
 
+    fn fr_epoch(recv_seq: u64, conn_epoch_us: u64) -> FundingRate {
+        FundingRate {
+            conn_epoch_us,
+            ..fr(recv_seq)
+        }
+    }
+
     fn fr(recv_seq: u64) -> FundingRate {
         FundingRate {
             funding_rate_ts_us: 0,
             local_funding_ts_us: 1_700_000_000_000_000,
             recv_seq,
-            conn_epoch: 1,
+            conn_epoch_us: 1,
             pair: TradingPair::new("BTC", "USDC"),
             funding_rate: d("0.0000125"),
             premium: None,
@@ -115,6 +122,34 @@ mod tests {
         let out = decompose_snapshots(&[snap_a, snap_b]);
         let seqs: Vec<u64> = out.funding_rates.iter().map(|f| f.recv_seq).collect();
         assert_eq!(seqs, vec![1, 2, 3], "wire truth: one row per push");
+    }
+
+    #[test]
+    fn reconnect_rows_reusing_a_recv_seq_survive_on_their_epoch() {
+        let mut before = MarketSnapshot::empty(1_000_000);
+        before.funding_rate = vec![fr_epoch(1, 1_788_375_005_000_000)];
+        let mut after = MarketSnapshot::empty(2_000_000);
+        after.funding_rate = vec![fr_epoch(1, 1_788_375_198_000_000)];
+
+        let out = decompose_snapshots(&[before, after]);
+        let epochs: Vec<u64> =
+            out.funding_rates.iter().map(|f| f.conn_epoch_us).collect();
+        assert_eq!(
+            epochs,
+            vec![1_788_375_005_000_000, 1_788_375_198_000_000],
+            "recv_seq restarts at 1 on reconnect; the epoch keeps both rows"
+        );
+    }
+
+    #[test]
+    fn one_epoch_still_collapses_a_repeated_recv_seq() {
+        let mut snap_a = MarketSnapshot::empty(1_000_000);
+        snap_a.funding_rate = vec![fr_epoch(2, 1_788_375_005_000_000)];
+        let mut snap_b = MarketSnapshot::empty(2_000_000);
+        snap_b.funding_rate = vec![fr_epoch(2, 1_788_375_005_000_000)];
+
+        let out = decompose_snapshots(&[snap_a, snap_b]);
+        assert_eq!(out.funding_rates.len(), 1);
     }
 
     #[test]

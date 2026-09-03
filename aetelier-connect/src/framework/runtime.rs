@@ -81,6 +81,17 @@ const SEED_DEADLINE_TICK: Duration = Duration::from_secs(1);
 
 const HEARTBEAT_TICK: Duration = Duration::from_secs(60);
 
+/// A datatype is judged silent only after this many of its venue-declared
+/// publication intervals pass with no event. Stated as a multiple so the
+/// deadline stays anchored to the venue's own guarantee rather than a minted
+/// number; two intervals means one whole publication may be missed before the
+/// feed is called stale.
+const STALE_CADENCE_MULTIPLE: u32 = 2;
+
+/// How often the cadence envelopes are swept. Bounded above by the shortest
+/// declared cadence in practice; a sweep is a map scan over live pairs.
+const CADENCE_SWEEP_TICK: Duration = Duration::from_secs(1);
+
 /// Routing mode for a pair's incoming book deltas. This is NOT the book's
 /// truth — sync state lives in `OrderBookState` on the book itself.
 enum Phase {
@@ -135,6 +146,11 @@ pub struct SourceRuntime {
     /// Worker-owned cross-reconnect trade-sequence carry (see
     /// [`Self::with_trade_seq_carry`]).
     trade_seq_carry: Option<Arc<std::sync::Mutex<HashMap<TradingPair, u64>>>>,
+    /// Venue-guaranteed publication cadence per datatype. Absent datatypes are
+    /// never judged silent.
+    datatype_cadence: HashMap<FeedDatatype, Duration>,
+    /// Last event instant per `(instrument, datatype)`, for the cadence sweep.
+    last_seen: HashMap<(TradingPair, FeedDatatype), tokio::time::Instant>,
 }
 
 impl SourceRuntime {
@@ -200,11 +216,24 @@ impl SourceRuntime {
             live_funding: HashSet::new(),
             live_oi: HashSet::new(),
             trade_seq_carry: None,
+            datatype_cadence: HashMap::new(),
+            last_seen: HashMap::new(),
         }
     }
 
     /// Attach the worker's shared `FeedSet`; the runtime then records
     /// per-feed Live/Resubscribing as books seed, gap, and reconcile.
+    /// Declare the venue-guaranteed cadence for a datatype. Only declared
+    /// datatypes can be marked stale; everything else is behaviourally
+    /// unchanged no matter how long it stays quiet.
+    pub fn with_datatype_cadence(
+        mut self,
+        cadences: impl IntoIterator<Item = (FeedDatatype, Duration)>,
+    ) -> Self {
+        self.datatype_cadence.extend(cadences);
+        self
+    }
+
     pub fn with_feeds(mut self, feeds: SharedFeedSet) -> Self {
         self.feeds = Some(feeds);
         self
@@ -304,6 +333,8 @@ impl SourceRuntime {
         seed_deadline.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut heartbeat = tokio::time::interval(HEARTBEAT_TICK);
         heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut cadence_sweep = tokio::time::interval(CADENCE_SWEEP_TICK);
+        cadence_sweep.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             if events_done && in_flight == 0 {
                 break;
@@ -315,6 +346,10 @@ impl SourceRuntime {
                     if *shutdown.borrow() {
                         break;
                     }
+                }
+
+                _ = cadence_sweep.tick() => {
+                    self.sweep_stale_datatypes();
                 }
 
                 _ = heartbeat.tick() => {
@@ -845,8 +880,48 @@ impl SourceRuntime {
         Ok(resync)
     }
 
+    /// Mark every `(instrument, datatype)` whose declared cadence envelope has
+    /// elapsed without an event. Datatype-scoped: the socket and its sibling
+    /// feeds are untouched.
+    fn sweep_stale_datatypes(&mut self) {
+        if self.feeds.is_none() || self.datatype_cadence.is_empty() {
+            return;
+        }
+        let now = tokio::time::Instant::now();
+        let overdue: Vec<(TradingPair, FeedDatatype)> = self
+            .last_seen
+            .iter()
+            .filter(|((_, datatype), seen)| {
+                self.datatype_cadence.get(datatype).is_some_and(|cadence| {
+                    now.duration_since(**seen) > *cadence * STALE_CADENCE_MULTIPLE
+                })
+            })
+            .map(|((pair, datatype), _)| (pair.clone(), *datatype))
+            .collect();
+        if overdue.is_empty() {
+            return;
+        }
+        if let Some(feeds) = &self.feeds
+            && let Ok(mut fs) = feeds.lock()
+        {
+            for (pair, datatype) in overdue {
+                tracing::warn!(
+                    exchange = %self.exchange,
+                    pair = %pair,
+                    ?datatype,
+                    "runtime.datatype_silent_past_declared_cadence"
+                );
+                fs.mark_stale(&pair, datatype);
+            }
+        }
+    }
+
     /// Record the first data for `(pair, datatype)` on the shared feed set.
     fn note_live(&mut self, pair: &TradingPair, datatype: FeedDatatype) {
+        if self.datatype_cadence.contains_key(&datatype) {
+            self.last_seen
+                .insert((pair.clone(), datatype), tokio::time::Instant::now());
+        }
         if self.feeds.is_none() {
             return;
         }
@@ -856,10 +931,11 @@ impl SourceRuntime {
             FeedDatatype::FundingRates => &mut self.live_funding,
             FeedDatatype::OpenInterest => &mut self.live_oi,
         };
-        if set.contains(pair) {
+        let first_data = set.insert(pair.clone());
+        let cadence_watched = self.datatype_cadence.contains_key(&datatype);
+        if !first_data && !cadence_watched {
             return;
         }
-        set.insert(pair.clone());
         if let Some(feeds) = &self.feeds
             && let Ok(mut fs) = feeds.lock()
         {
@@ -999,6 +1075,195 @@ fn book_ts(b: &PairBook) -> u64 {
 
 #[cfg(test)]
 mod tests {
+
+    fn funding_event(pair: &TradingPair) -> DomainEvent {
+        DomainEvent::FundingRate(aetelier_types::funding::FundingRate {
+            funding_rate_ts_us: 1,
+            local_funding_ts_us: 1,
+            recv_seq: 1,
+            conn_epoch_us: 0,
+            pair: pair.clone(),
+            funding_rate: "0.0001".parse().unwrap(),
+            premium: None,
+            interval_hours: 1,
+            next_funding_ts_us: 0,
+            exchange: "binance".to_string(),
+        })
+    }
+
+    fn oi_event(pair: &TradingPair) -> DomainEvent {
+        DomainEvent::OpenInterest(aetelier_types::open_interest::OpenInterest {
+            open_interest_ts_us: 1,
+            local_oi_ts_us: 1,
+            recv_seq: 1,
+            conn_epoch_us: 0,
+            pair: pair.clone(),
+            open_interest: "10".parse().unwrap(),
+            open_interest_value: None,
+            mark_px: None,
+            exchange: "binance".to_string(),
+        })
+    }
+
+    fn cadence_runtime(
+        feeds: SharedFeedSet,
+        cadences: Vec<(FeedDatatype, Duration)>,
+    ) -> SourceRuntime {
+        SourceRuntime::new(
+            "binance",
+            SymbolCodec::Concat { upper: true },
+            vec!["BTCUSDT".to_string()],
+            binance_model(),
+            RecoveryAction::RestSnapshot,
+            SourceMetrics::default(),
+            DeclaredSet::all(),
+        )
+        .with_feeds(feeds)
+        .with_datatype_cadence(cadences)
+    }
+
+    fn feed_state(
+        feeds: &SharedFeedSet,
+        pair: &TradingPair,
+        dt: FeedDatatype,
+    ) -> FeedState {
+        feeds
+            .lock()
+            .unwrap()
+            .snapshot()
+            .into_iter()
+            .find(|f| f.instrument == pair.to_canonical() && f.datatype == dt)
+            .expect("feed present")
+            .state
+    }
+
+    fn live_feed_set(pair: &TradingPair) -> SharedFeedSet {
+        let mut set = FeedSet::new(vec![
+            Feed::new(Exchange::Binance, pair.clone(), FeedDatatype::FundingRates),
+            Feed::new(Exchange::Binance, pair.clone(), FeedDatatype::OpenInterest),
+        ]);
+        set.mark_all_subscribing();
+        set.into_shared()
+    }
+
+    #[tokio::test]
+    async fn a_silent_declared_datatype_goes_stale_while_its_sibling_streams() {
+        let pair = TradingPair::new("BTC", "USDT");
+        let feeds = live_feed_set(&pair);
+        let mut runtime = cadence_runtime(
+            feeds.clone(),
+            vec![
+                (FeedDatatype::FundingRates, Duration::from_millis(20)),
+                (FeedDatatype::OpenInterest, Duration::from_millis(20)),
+            ],
+        );
+
+        let (out_tx, mut out_rx) = mpsc::channel(8);
+        tokio::spawn(async move { while out_rx.recv().await.is_some() {} });
+        let (_seed_tx, mut _seed_rx) = mpsc::channel::<SeedResult>(1);
+        let mut in_flight = 0usize;
+        let seeder: Option<Arc<dyn RestSnapshot>> = None;
+
+        runtime
+            .handle_event(
+                funding_event(&pair),
+                &out_tx,
+                &seeder,
+                &_seed_tx,
+                &mut in_flight,
+            )
+            .await
+            .unwrap();
+        runtime
+            .handle_event(oi_event(&pair), &out_tx, &seeder, &_seed_tx, &mut in_flight)
+            .await
+            .unwrap();
+
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        runtime
+            .handle_event(oi_event(&pair), &out_tx, &seeder, &_seed_tx, &mut in_flight)
+            .await
+            .unwrap();
+        runtime.sweep_stale_datatypes();
+
+        assert_eq!(
+            feed_state(&feeds, &pair, FeedDatatype::FundingRates),
+            FeedState::Stale,
+            "the silent datatype is marked"
+        );
+        assert_eq!(
+            feed_state(&feeds, &pair, FeedDatatype::OpenInterest),
+            FeedState::Live,
+            "its streaming sibling on the same socket is untouched"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_datatype_without_a_declared_cadence_is_never_marked_stale() {
+        let pair = TradingPair::new("BTC", "USDT");
+        let feeds = live_feed_set(&pair);
+        let mut runtime = cadence_runtime(feeds.clone(), Vec::new());
+
+        let (out_tx, mut out_rx) = mpsc::channel(8);
+        tokio::spawn(async move { while out_rx.recv().await.is_some() {} });
+        let (_seed_tx, mut _seed_rx) = mpsc::channel::<SeedResult>(1);
+        let mut in_flight = 0usize;
+        let seeder: Option<Arc<dyn RestSnapshot>> = None;
+
+        runtime
+            .handle_event(
+                funding_event(&pair),
+                &out_tx,
+                &seeder,
+                &_seed_tx,
+                &mut in_flight,
+            )
+            .await
+            .unwrap();
+
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        runtime.sweep_stale_datatypes();
+
+        assert_eq!(
+            feed_state(&feeds, &pair, FeedDatatype::FundingRates),
+            FeedState::Live,
+            "silence is not evidence where the venue guarantees nothing"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_declared_datatype_inside_its_envelope_is_not_marked() {
+        let pair = TradingPair::new("BTC", "USDT");
+        let feeds = live_feed_set(&pair);
+        let mut runtime = cadence_runtime(
+            feeds.clone(),
+            vec![(FeedDatatype::FundingRates, Duration::from_secs(3600))],
+        );
+
+        let (out_tx, mut out_rx) = mpsc::channel(8);
+        tokio::spawn(async move { while out_rx.recv().await.is_some() {} });
+        let (_seed_tx, mut _seed_rx) = mpsc::channel::<SeedResult>(1);
+        let mut in_flight = 0usize;
+        let seeder: Option<Arc<dyn RestSnapshot>> = None;
+
+        runtime
+            .handle_event(
+                funding_event(&pair),
+                &out_tx,
+                &seeder,
+                &_seed_tx,
+                &mut in_flight,
+            )
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        runtime.sweep_stale_datatypes();
+
+        assert_eq!(
+            feed_state(&feeds, &pair, FeedDatatype::FundingRates),
+            FeedState::Live
+        );
+    }
     use super::*;
     use crate::clients::wss::WssDecoder;
     use crate::framework::feed::{Feed, FeedDatatype, FeedSet, FeedState};

@@ -42,7 +42,13 @@ impl DomainEvent {
     /// time (UTC epoch µs, the platform standard) and the connection
     /// round-trip (µs). Called once per event by the framework driver before
     /// the event leaves the transport layer.
-    pub(crate) fn stamp_local(&mut self, local_us: u64, rtt_us: u64, recv_seq: u64) {
+    pub(crate) fn stamp_local(
+        &mut self,
+        local_us: u64,
+        rtt_us: u64,
+        recv_seq: u64,
+        conn_epoch_us: u64,
+    ) {
         match self {
             DomainEvent::Book(d) => {
                 d.local_orderbook_ts_us = local_us;
@@ -55,10 +61,12 @@ impl DomainEvent {
             DomainEvent::FundingRate(fr) => {
                 fr.local_funding_ts_us = local_us;
                 fr.recv_seq = recv_seq;
+                fr.conn_epoch_us = conn_epoch_us;
             }
             DomainEvent::OpenInterest(oi) => {
                 oi.local_oi_ts_us = local_us;
                 oi.recv_seq = recv_seq;
+                oi.conn_epoch_us = conn_epoch_us;
             }
             DomainEvent::FundingSettlement(fs) => {
                 if fs.local_ts_us == 0 {
@@ -1434,6 +1442,55 @@ mod tests {
     }
 
     #[test]
+    fn stamp_local_carries_conn_epoch_us_into_derivative_rows() {
+        use aetelier_types::funding::FundingRate;
+        use aetelier_types::open_interest::OpenInterest;
+        use aetelier_types::trading_pair::TradingPair;
+
+        let mut funding = DomainEvent::FundingRate(FundingRate {
+            funding_rate_ts_us: 1,
+            local_funding_ts_us: 0,
+            recv_seq: 0,
+            conn_epoch_us: 0,
+            pair: TradingPair::new("BTC", "USDC"),
+            funding_rate: "0.0001".parse().unwrap(),
+            premium: None,
+            interval_hours: 1,
+            next_funding_ts_us: 0,
+            exchange: "hyperliquid".to_string(),
+        });
+        funding.stamp_local(42, 7, 3, 1_788_375_005_000_000);
+        match &funding {
+            DomainEvent::FundingRate(fr) => {
+                assert_eq!(fr.conn_epoch_us, 1_788_375_005_000_000);
+                assert_eq!(fr.recv_seq, 3);
+                assert_eq!(fr.local_funding_ts_us, 42);
+            }
+            other => panic!("wrong variant: {other:?}"),
+        }
+
+        let mut oi = DomainEvent::OpenInterest(OpenInterest {
+            open_interest_ts_us: 1,
+            local_oi_ts_us: 0,
+            recv_seq: 0,
+            conn_epoch_us: 0,
+            pair: TradingPair::new("BTC", "USDC"),
+            open_interest: "10".parse().unwrap(),
+            open_interest_value: None,
+            mark_px: None,
+            exchange: "hyperliquid".to_string(),
+        });
+        oi.stamp_local(43, 7, 4, 1_788_375_198_000_000);
+        match &oi {
+            DomainEvent::OpenInterest(o) => {
+                assert_eq!(o.conn_epoch_us, 1_788_375_198_000_000);
+                assert_eq!(o.recv_seq, 4);
+            }
+            other => panic!("wrong variant: {other:?}"),
+        }
+    }
+
+    #[test]
     fn stamp_local_sets_only_the_matching_variant_fields() {
         let mut book = DomainEvent::Book(delta(
             "BTCUSDT",
@@ -1443,7 +1500,7 @@ mod tests {
             0,
             false,
         ));
-        book.stamp_local(1_234_567_890, 250, 1);
+        book.stamp_local(1_234_567_890, 250, 1, 7);
         match &book {
             DomainEvent::Book(d) => {
                 assert_eq!(d.local_orderbook_ts_us, 1_234_567_890);
@@ -1462,7 +1519,7 @@ mod tests {
             trade: tr,
             sequence: Some(42),
         };
-        trade.stamp_local(9_876_543_210, 333, 2);
+        trade.stamp_local(9_876_543_210, 333, 2, 7);
         match &trade {
             DomainEvent::Trade { trade, sequence } => {
                 assert_eq!(trade.local_trade_ts_us, 9_876_543_210);
