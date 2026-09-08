@@ -1,9 +1,11 @@
 use std::path::{Path, PathBuf};
 
+#[cfg(feature = "parquet")]
 pub(crate) fn effective_us(primary: u64, fallback: u64) -> u64 {
     if primary > 0 { primary } else { fallback }
 }
 
+#[cfg(feature = "parquet")]
 pub(crate) fn batch_stamp<I: IntoIterator<Item = u64>>(ts_us: I) -> String {
     let min = ts_us.into_iter().filter(|t| *t > 0).min().unwrap_or(0);
     match chrono::DateTime::from_timestamp_micros(min as i64) {

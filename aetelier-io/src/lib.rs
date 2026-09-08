@@ -38,7 +38,6 @@ pub(crate) mod parquet_err {
 }
 
 /// Orderbook I/O (Parquet, CSV, JSON, terminal)
-#[cfg(feature = "parquet")]
 pub(crate) mod naming;
 pub mod orderbooks;
 
@@ -68,6 +67,10 @@ pub mod rehydrate;
 
 #[cfg(all(feature = "connect", feature = "parquet"))]
 pub use flush::{FlushAggregateToParquet, FlushObSyncToParquet, FlushToParquet};
+
+/// Per-leaf write-side integrity index (`index.jsonl`) and the atomic
+/// parquet finalize path (staging, fsync, rename, directory fsync).
+pub mod leaf_index;
 
 /// Concrete [`SnapshotFlusher`](aetelier_connect::workers::SnapshotFlusher) for Parquet (requires `connect` + `parquet` features)
 #[cfg(all(feature = "connect", feature = "parquet"))]
