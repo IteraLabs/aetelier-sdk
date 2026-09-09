@@ -50,7 +50,7 @@ fn flush_finalizes_hashes_and_indexes_every_file() {
     assert_eq!(entry.rows, 2);
     assert_eq!(entry.t_min_us, 1_700_000_000_000_000);
     assert_eq!(entry.t_max_us, 1_700_000_000_250_000);
-    assert_eq!(entry.schema_id, "trades:sync:1");
+    assert_eq!(entry.schema_id, "trades.v1");
     assert_eq!(
         entry.sha256,
         leaf_index::sha256_file(&leaf.join(&entry.filename)).unwrap()
@@ -134,6 +134,56 @@ fn second_writer_on_the_same_leaf_is_refused() {
     assert!(
         !foreign.try_lock_exclusive().unwrap(),
         "the flusher must still hold the leaf's exclusive flock"
+    );
+}
+
+#[test]
+fn templated_dir_lands_day_bounded_canonical_leaves() {
+    let dir = tempdir().unwrap();
+    let binding = "0f6e2b1c-8f4e-4c1e-9d2a-1b2c3d4e5f60";
+    let template = dir
+        .path()
+        .join("recorded/binance/spot/{data_type}")
+        .join(binding);
+    let ts_us: u64 = 1_788_913_805_200_000;
+    let mut snap = snapshot_with_trade(ts_us);
+    snap.funding_rate
+        .push(aetelier_types::funding::FundingRate {
+            funding_rate_ts_us: ts_us,
+            local_funding_ts_us: ts_us,
+            recv_seq: 1,
+            conn_epoch_us: 1,
+            pair: TradingPair::new("BTC", "USDT"),
+            funding_rate: "0.0001".parse().unwrap(),
+            premium: None,
+            interval_hours: 8,
+            next_funding_ts_us: 0,
+            exchange: "binance".to_string(),
+        });
+    ParquetSnapshotFlusher
+        .flush_snapshots(&[snap], template.to_str().unwrap())
+        .unwrap();
+
+    let day = chrono::DateTime::from_timestamp_micros(ts_us as i64)
+        .unwrap()
+        .format("%Y-%m-%d")
+        .to_string();
+    for datatype in ["trades", "funding_rates"] {
+        let leaf = dir
+            .path()
+            .join("recorded/binance/spot")
+            .join(datatype)
+            .join(binding)
+            .join(&day);
+        let (entries, torn) = leaf_index::read_index(&leaf).unwrap();
+        assert_eq!(torn, 0, "{datatype}");
+        assert_eq!(entries.len(), 1, "{datatype}");
+        assert_eq!(entries[0].schema_id, format!("{datatype}.v1"));
+        assert!(leaf.join(&entries[0].filename).exists());
+    }
+    assert!(
+        !dir.path().join("recorded/binance/spot/fundings").exists(),
+        "legacy fundings leaf must not appear on the wave layout"
     );
 }
 

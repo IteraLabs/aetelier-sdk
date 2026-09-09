@@ -41,6 +41,30 @@ fn file_bytes(path: &std::path::Path) -> Result<u64, PersistError> {
     Ok(std::fs::metadata(path)?.len())
 }
 
+/// Resolves the leaf directory for one datatype (gticket_0039 D2/D10). A
+/// platform-composed dir carries the LITERAL `{data_type}` placeholder
+/// (`datasets/recorded/<exchange>/<market_type>/{data_type}/<binding_id>`):
+/// the placeholder is substituted and a UTC day segment derived from the
+/// batch's `t_min_us` is appended, so leaves are day-bounded with one index
+/// per day-dir. A dir without the placeholder keeps the legacy
+/// `<dir>/<data_type>/` shape (dev and BYO continuity).
+fn leaf_dir_for(
+    output_path: &std::path::Path,
+    datatype: &str,
+    t_min_us: u64,
+) -> std::path::PathBuf {
+    let raw = output_path.to_string_lossy();
+    if raw.contains("{data_type}") {
+        let substituted = raw.replace("{data_type}", datatype);
+        let day = chrono::DateTime::from_timestamp_micros(t_min_us as i64)
+            .map(|dt| dt.format("%Y-%m-%d").to_string())
+            .unwrap_or_else(|| "1970-01-01".to_string());
+        std::path::PathBuf::from(substituted).join(day)
+    } else {
+        output_path.join(datatype)
+    }
+}
+
 /// Writes one datatype's batch through the atomic finalize path: staged
 /// write, fsync, rename into the leaf, leaf-directory fsync, then the
 /// `index.jsonl` append. A crash before the rename leaves only `.staging`
@@ -60,7 +84,7 @@ fn persist_leaf<F>(
 where
     F: FnOnce(&std::path::Path) -> Result<std::path::PathBuf, PersistError>,
 {
-    let leaf = output_path.join(datatype);
+    let leaf = leaf_dir_for(output_path, datatype, t_min_us);
     std::fs::create_dir_all(&leaf)?;
     crate::leaf_index::acquire_leaf_lock(&leaf)?;
     crate::leaf_index::sweep_staging(&leaf);
@@ -83,7 +107,7 @@ where
             rows,
             t_min_us,
             t_max_us,
-            schema_id: format!("{datatype}:sync:1"),
+            schema_id: format!("{datatype}.v1"),
         },
     )?;
     Ok(bytes)
@@ -171,7 +195,7 @@ impl SnapshotFlusher for ParquetSnapshotFlusher {
         if !funding_rates.is_empty() {
             total_bytes += persist_leaf(
                 output_path,
-                "fundings",
+                "funding_rates",
                 funding_rates.len() as u64,
                 t_min_us,
                 t_max_us,
