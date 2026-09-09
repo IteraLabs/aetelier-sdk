@@ -64,6 +64,11 @@ name = "test_flusher_atomicity"
 path = "tests/sink/test_flusher_atomicity.rs"
 required-features = ["connect", "parquet"]
 
+[[test]]
+name = "test_schema_fingerprints"
+path = "tests/registry/test_schema_fingerprints.rs"
+required-features = ["parquet"]
+
 [dependencies]
 aetelier-connect = { path = "../aetelier-connect", version = "0.1.0", optional = true }
 aetelier-types = { path = "../aetelier-types", version = "0.1.0" }
