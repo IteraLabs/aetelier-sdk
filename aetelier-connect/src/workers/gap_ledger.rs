@@ -74,8 +74,27 @@ pub struct GapLedger {
 
 impl GapLedger {
     /// Build the ledger for a worker writing under `output_dir` (the parquet
-    /// sink dir). Creates `gaps/` lazily on first append.
+    /// sink dir). On the wave layout (gticket_0039 D6) — a platform dir
+    /// `datasets/recorded/<exchange>/<market_type>/{data_type}/<binding_id>` —
+    /// the ledger moves OUT of the market tree to the sibling gaps area:
+    /// `<root>/gaps/<binding_id>_gap_ledger.jsonl`, where `<root>` is the
+    /// path up to `recorded/` and `<binding_id>` is the dir's last segment.
+    /// Legacy dirs keep `<dir>/gaps/<exchange>_<symbol>_gap_ledger.jsonl`.
+    /// Creates the gaps dir lazily on first append.
     pub fn new(output_dir: &Path, exchange: &str, symbol: &str) -> Self {
+        let raw = output_dir.to_string_lossy();
+        if raw.contains("/recorded/") && raw.contains("{data_type}") {
+            let root = raw.split("/recorded/").next().unwrap_or("");
+            let binding = output_dir
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "unknown-binding".to_string());
+            return Self {
+                path: Path::new(root)
+                    .join("gaps")
+                    .join(format!("{binding}_gap_ledger.jsonl")),
+            };
+        }
         let file = format!(
             "{}_{}_gap_ledger.jsonl",
             exchange,
@@ -109,6 +128,22 @@ impl GapLedger {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wave_layout_moves_ledger_to_collected_gaps() {
+        let dir =
+            Path::new("/data/collected/recorded/binance/spot/{data_type}/0f6e2b1c-bind");
+        let ledger = GapLedger::new(dir, "binance", "BTC/USDT");
+        assert_eq!(
+            ledger.path(),
+            Path::new("/data/collected/gaps/0f6e2b1c-bind_gap_ledger.jsonl")
+        );
+        let legacy = GapLedger::new(Path::new("/out"), "binance", "BTC/USDT");
+        assert_eq!(
+            legacy.path(),
+            Path::new("/out/gaps/binance_BTC-USDT_gap_ledger.jsonl")
+        );
+    }
 
     fn incident(opened: u64, closed: u64, cause: GapCause) -> GapIncident {
         GapIncident {
