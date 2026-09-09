@@ -1,0 +1,11 @@
+{
+  "canonicalization": "parquet_schema_printer.sha256",
+  "fingerprints": {
+    "funding_rates": "49eb8226fc89135a24b3237f6765c9160bf4318f79a43e6bfaccc35546793bc8",
+    "funding_settlements": "c81940b7d9e0e21fc13d9dd91d8978aaf1ce63f43fe5dbf8d3564c7d2c45916a",
+    "liquidations": "80591f17053dd5b74fa9dc0a128bc590a64ea5775e18249da3c5b4c8a02b83da",
+    "open_interests": "bfc5f54c0d6e8bf1076090e210a4e8a9eb8a64104058f00cfd30c5a3ccc39874",
+    "orderbooks": "daf78ab9cad421182af1b433d80611041ea500ac5b3bd32a5ff4265e2abb3eb0",
+    "trades": "a18403eb0853c1a61f483c77c61c99f9f45ef29814ad9cfa605d93d643752502"
+  }
+}
