@@ -14,8 +14,7 @@ repository or on the docs site does not exist. Do not infer one.
 
 ## Binaries
 
-Declared in `aetelier-sdk/Cargo.toml`. `md_worker` is also declared by
-`aetelier-connect`, so a workspace-root invocation must name the package.
+Declared in `aetelier-sdk/Cargo.toml`.
 
 | Binary | Package | Feature |
 |---|---|---|

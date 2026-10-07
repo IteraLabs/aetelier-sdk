@@ -3,11 +3,11 @@
 # Drop this file into /etc/cron.d/aetelier-validate (root-owned, mode 0644).
 # The wrapper script must already exist at /usr/local/bin/run_validate.sh
 # (or wherever you prefer — adjust the path below). The image
-# `aetelier-validate:v0.1.0` should be present on the host;
-# build it once with:
+# `aetelier-validate:v0.1.1` should be present on the host;
+# build it once from the parent of this repository with:
 #
-#   docker build -t aetelier-validate:v0.1.0 \
-#                -f aetelier-sdk/serve/validate.Dockerfile .
+#   docker build -t aetelier-validate:v0.1.1 \
+#                -f aetelier-sdk/aetelier-sdk/serve/validate.Dockerfile .
 #
 # A standard /etc/cron.d entry needs an explicit user column.
 #
