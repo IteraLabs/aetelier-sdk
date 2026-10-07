@@ -385,7 +385,7 @@ mod tests {
         let fname = path.file_name().unwrap().to_str().unwrap();
         assert_eq!(
             fname,
-            "bybit_BTC-USDT_trades_sync_20230916_090000.000.parquet"
+            "bybit_BTC-USDT_trades_sync_20230916_090000.000000.parquet"
         );
     }
 

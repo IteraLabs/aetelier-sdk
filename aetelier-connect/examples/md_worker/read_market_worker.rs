@@ -7,11 +7,11 @@
 //!
 //! # Filename convention
 //!
-//! Writers produce files named `{SYMBOL}_{DATATYPE}_{MODE}_{TS}.parquet`,
-//! e.g. `BTCUSDT_ob_sync_20260226_153000.123.parquet`.
+//! Writers produce files named `{EXCHANGE}_{SYMBOL}_{DATATYPE}_{MODE}_{TS}.parquet`,
+//! e.g. `bybit_BTC-USDT_ob_sync_20260226_153000.123456.parquet`.
 //!
-//! The reader extracts the symbol from the segment before the data-type tag
-//! (`_ob_`, `_trades_`, `_liquidations_`, `_funding_`, `_oi_`).
+//! The reader groups files by the segment before the data-type tag
+//! (`_ob_`, `_trades_`, `_liquidations_`, `_funding_`, `_oi_`), e.g. `bybit_BTC-USDT`.
 //!
 //! # Usage
 //!
@@ -64,8 +64,8 @@ struct Cli {
 ///
 /// Returns a `BTreeMap<symbol, Vec<PathBuf>>` sorted by symbol.
 ///
-/// E.g. for tag `"_ob_"`, the file `BTCUSDT_ob_sync_20260226_153000.parquet`
-/// yields symbol `"BTCUSDT"`.
+/// E.g. for tag `"_ob_"`, the file `bybit_BTC-USDT_ob_sync_20260226_153000.123456.parquet`
+/// yields key `"bybit_BTC-USDT"`.
 fn collect_and_group(dir: &Path, datatype_tag: &str) -> BTreeMap<String, Vec<PathBuf>> {
     let mut groups: BTreeMap<String, Vec<PathBuf>> = BTreeMap::new();
 

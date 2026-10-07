@@ -59,7 +59,7 @@ mod fingerprints {
         delta.process(&normalized).unwrap();
         Orderbook::from_levels(
             0,
-            1_672_304_484_978_000_000,
+            1_672_304_484_978_123,
             pair,
             "kraken".to_string(),
             vec![],
@@ -70,7 +70,7 @@ mod fingerprints {
 
     fn sample_trade() -> Trade {
         Trade {
-            source_trade_ts_us: 1_672_304_484_932_000,
+            source_trade_ts_us: 1_672_304_484_932_456,
             local_trade_ts_us: 0,
             source_trade_rtt_us: 0,
             pair: TradingPair::new("BTC", "USDT"),
@@ -85,7 +85,7 @@ mod fingerprints {
 
     fn sample_liquidation() -> Liquidation {
         Liquidation {
-            liquidation_ts_us: 1_672_304_484_932,
+            liquidation_ts_us: 1_672_304_484_932_000,
             pair: TradingPair::new("BTC", "USDT"),
             side: TradeSide::Buy,
             amount: f64_to_decimal(0.125),
@@ -210,5 +210,104 @@ mod fingerprints {
             }))
             .unwrap()
         );
+    }
+
+    #[test]
+    fn every_writer_names_files_by_the_naming_contract() {
+        use aetelier_io::naming::{FileKind, parse_file_name};
+        let dir = tempdir().unwrap();
+        let mut hip3_settlement = sample_settlement();
+        hip3_settlement.pair = TradingPair::new("xyz:TSLA", "USDC");
+        let written = [
+            (
+                FileKind::Orderbook,
+                "kraken",
+                "BTC-USDT",
+                1_672_304_484_978_123,
+                aetelier_io::orderbooks::write_ob_parquet(
+                    &[sample_orderbook()],
+                    dir.path(),
+                    "sync",
+                ),
+            ),
+            (
+                FileKind::Trades,
+                "kraken",
+                "BTC-USDT",
+                1_672_304_484_932_456,
+                aetelier_io::trades::write_trades_parquet_timestamped(
+                    &[sample_trade()],
+                    dir.path(),
+                    "sync",
+                ),
+            ),
+            (
+                FileKind::Liquidations,
+                "kraken",
+                "BTC-USDT",
+                1_672_304_484_932_000,
+                aetelier_io::liquidations::write_liquidations_parquet_timestamped(
+                    &[sample_liquidation()],
+                    dir.path(),
+                    "sync",
+                ),
+            ),
+            (
+                FileKind::Funding,
+                "kraken",
+                "BTC-USDT",
+                1_672_304_484_000_000,
+                aetelier_io::funding::write_funding_parquet_timestamped(
+                    &[sample_funding_rate()],
+                    dir.path(),
+                    "sync",
+                ),
+            ),
+            (
+                FileKind::OpenInterest,
+                "kraken",
+                "BTC-USDT",
+                1_672_304_484_000_000,
+                aetelier_io::open_interest::write_oi_parquet_timestamped(
+                    &[sample_open_interest()],
+                    dir.path(),
+                    "sync",
+                ),
+            ),
+            (
+                FileKind::FundingSettlement,
+                "hyperliquid",
+                "BTC-USDC",
+                1_672_304_484_000_000,
+                aetelier_io::funding::write_funding_settlement_parquet_timestamped(
+                    &[sample_settlement()],
+                    dir.path(),
+                    "sync",
+                ),
+            ),
+            (
+                FileKind::FundingSettlement,
+                "hyperliquid",
+                "xyz_TSLA-USDC",
+                1_672_304_484_000_000,
+                aetelier_io::funding::write_funding_settlement_parquet_timestamped(
+                    &[hip3_settlement],
+                    dir.path(),
+                    "sync",
+                ),
+            ),
+        ];
+        for (kind, exchange, symbol, stamp_us, path) in written {
+            let path = path.unwrap();
+            let name = path.file_name().unwrap().to_str().unwrap();
+            let parsed =
+                parse_file_name(name).unwrap_or_else(|| panic!("unparseable: {name}"));
+            assert_eq!(
+                (parsed.kind, parsed.exchange, parsed.symbol, parsed.mode),
+                (kind, exchange, symbol, "sync"),
+                "{name}"
+            );
+            assert_eq!(parsed.stamp.timestamp_micros(), stamp_us, "{name}");
+        }
     }
 }

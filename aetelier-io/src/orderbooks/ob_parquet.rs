@@ -546,22 +546,22 @@ pub fn write_ob_parquet(
 
 /// Write a batch of synchronized `Orderbook` snapshots to a single Parquet file.
 ///
-/// Schema: `orderbook_ts_us | symbol | exchange | side | level | price | size`
+/// Schema: `orderbook_ts_us | symbol | exchange | side | level | price | size |
+/// source_orderbook_ts_us | local_orderbook_ts_us | source_orderbook_rtt_us`
 ///
 /// Reads directly from `Orderbook.bids` and `Orderbook.asks` (`Vec<Level>`),
-/// using `Level.price` and `Level.volume`. All timestamps come from
-/// `Orderbook.orderbook_ts_us` which holds the grid-aligned nanosecond value.
+/// using `Level.price` and `Level.volume`. Timestamps are written as given, in µs.
 ///
 /// # Filename convention
 ///
 /// Output file: `{EXCHANGE}_{SYMBOL}_ob_{MODE}_{TIMESTAMP}.parquet`
 ///
-/// The symbol is sanitised for filesystem safety (`/` → `-`), so Kraken's
+/// The symbol is sanitised for filesystem safety (`/` → `-`, `:` → `_`), so Kraken's
 /// `BTC/USDT` becomes `BTC-USDT` in the filename while the Parquet data
 /// retains the original symbol string.
 ///
-/// Examples: `bybit_BTCUSDT_ob_sync_20260226_153000.123.parquet`,
-///           `kraken_BTC-USDT_ob_sync_20260226_153000.123.parquet`
+/// Examples: `bybit_ETH-USDT_ob_sync_20260226_153000.123456.parquet`,
+///           `kraken_BTC-USDT_ob_sync_20260226_153000.123456.parquet`
 ///
 /// # Arguments
 ///
@@ -593,13 +593,6 @@ pub fn write_ob_parquet(
         .iter()
         .map(|ob| ob.bids.len() + ob.asks.len())
         .sum();
-
-    let file_symbol = snapshots[0]
-        .pair
-        .to_canonical()
-        .replace('/', "-")
-        .replace(':', "_");
-    let file_exchange = snapshots[0].exchange.clone();
 
     let mut timestamps = Vec::with_capacity(total_rows);
     let mut symbols: Vec<String> = Vec::with_capacity(total_rows);
@@ -677,9 +670,12 @@ pub fn write_ob_parquet(
     let file_ts = crate::naming::batch_stamp(snapshots.iter().map(|s| {
         crate::naming::effective_us(s.orderbook_ts_us, s.local_orderbook_ts_us)
     }));
-    let filename = format!(
-        "{}_{}_ob_{}_{}.parquet",
-        file_exchange, file_symbol, mode, file_ts
+    let filename = crate::naming::file_name(
+        &snapshots[0].exchange,
+        &snapshots[0].pair.to_canonical(),
+        crate::naming::FileKind::Orderbook,
+        mode,
+        file_ts,
     );
     let path = crate::naming::unique_path(output_dir, &filename);
     let file = File::create(&path)?;
