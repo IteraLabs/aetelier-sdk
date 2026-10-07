@@ -8,6 +8,7 @@ entry is edited only to correct a factual error, never to restate its scope.
 
 ### Promotions
 
+- 2026-10-06 · `chore/rust-1.99-lints` — Rust 1.99.0 toolchain pin; async-trait 0.1.92; `aetelier-connect` `md_worker` stub removed.
 - 2026-08-22 · `staging` (#14) — staging promoted to `main`.
 - 2026-08-22 · `chore/pr-template` (#13) — pull-request template gains evidence sections.
 - 2026-08-22 · `fix/storage-type-correctness` (#12) — decode bounds, archive client deadlines, delta column declaration order.
@@ -29,6 +30,8 @@ entry is edited only to correct a factual error, never to restate its scope.
 ### Changed
 
 - A failed response-body read on the archive path is now classified and retried by the same transport policy as a failed send, instead of terminating the run; the two paths share one retry budget.
+- Builds use Rust 1.99.0 via `rust-toolchain.toml`; MSRV stays 1.88.0.
+- `aetelier-connect` no longer ships an `md_worker` binary; run `aetelier-sdk`'s.
 
 ## v0.1.0 — 2026-07-30
 
