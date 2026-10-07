@@ -39,10 +39,8 @@ jobs:
           for f in aetelier-sdk/serve/*.Dockerfile; do
             grep -qxF "FROM rust:${CHANNEL}-bookworm AS builder" "$f" || { echo "::error file=$f::builder image is not rust:${CHANNEL}-bookworm"; exit 1; }
           done
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: ${{ steps.toolchain.outputs.channel }}
-          components: clippy, rustfmt
+      - name: install rust toolchain
+        run: rustup toolchain install --no-self-update
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest
@@ -85,12 +83,8 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - id: toolchain
-        shell: bash
-        run: echo "channel=$(sed -nE 's/^channel = "(.+)"$/\1/p' rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: ${{ steps.toolchain.outputs.channel }}
+      - name: install rust toolchain
+        run: rustup toolchain install --no-self-update
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest
@@ -122,12 +116,8 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
-      - id: toolchain
-        shell: bash
-        run: echo "channel=$(sed -nE 's/^channel = "(.+)"$/\1/p' rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: ${{ steps.toolchain.outputs.channel }}
+      - name: install rust toolchain
+        run: rustup toolchain install --no-self-update
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-hack
@@ -137,13 +127,12 @@ jobs:
         run: cargo hack check --locked --workspace --each-feature --exclude-features torch
 
   msrv:
-    name: MSRV (1.88.0)
+    name: MSRV (1.99.0)
     runs-on: ubuntu-24.04
-    env:
-      RUSTUP_TOOLCHAIN: 1.88.0
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@1.88.0
+      - name: install rust toolchain
+        run: rustup toolchain install --no-self-update
       - uses: Swatinem/rust-cache@v2
       - name: cargo check on the declared rust-version
         run: cargo check --locked --workspace
@@ -153,12 +142,8 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
-      - id: toolchain
-        shell: bash
-        run: echo "channel=$(sed -nE 's/^channel = "(.+)"$/\1/p' rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: ${{ steps.toolchain.outputs.channel }}
+      - name: install rust toolchain
+        run: rustup toolchain install --no-self-update
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-deny
