@@ -28,8 +28,20 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - uses: dtolnay/rust-toolchain@stable
+      - id: toolchain
+        shell: bash
+        run: echo "channel=$(sed -nE 's/^channel = "(.+)"$/\1/p' rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
+      - name: Docker builder image matches rust-toolchain.toml
+        shell: bash
+        env:
+          CHANNEL: ${{ steps.toolchain.outputs.channel }}
+        run: |
+          for f in aetelier-sdk/serve/*.Dockerfile; do
+            grep -qxF "FROM rust:${CHANNEL}-bookworm AS builder" "$f" || { echo "::error file=$f::builder image is not rust:${CHANNEL}-bookworm"; exit 1; }
+          done
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: ${{ steps.toolchain.outputs.channel }}
           components: clippy, rustfmt
       - uses: taiki-e/install-action@v2
         with:
@@ -73,7 +85,12 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - uses: dtolnay/rust-toolchain@stable
+      - id: toolchain
+        shell: bash
+        run: echo "channel=$(sed -nE 's/^channel = "(.+)"$/\1/p' rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.toolchain.outputs.channel }}
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest
@@ -105,7 +122,12 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - id: toolchain
+        shell: bash
+        run: echo "channel=$(sed -nE 's/^channel = "(.+)"$/\1/p' rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.toolchain.outputs.channel }}
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-hack
@@ -117,6 +139,8 @@ jobs:
   msrv:
     name: MSRV (1.88.0)
     runs-on: ubuntu-24.04
+    env:
+      RUSTUP_TOOLCHAIN: 1.88.0
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.88.0
@@ -129,7 +153,12 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - id: toolchain
+        shell: bash
+        run: echo "channel=$(sed -nE 's/^channel = "(.+)"$/\1/p' rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.toolchain.outputs.channel }}
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-deny

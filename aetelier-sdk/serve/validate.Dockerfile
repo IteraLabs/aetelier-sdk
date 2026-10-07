@@ -27,7 +27,7 @@
 #   into a cron-driven monitor or alertmanager probe.
 
 # ── Stage 1: builder ──────────────────────────────────────────────────────────
-FROM rust:1.88-bookworm AS builder
+FROM rust:1.99.0-bookworm AS builder
 WORKDIR /app
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
