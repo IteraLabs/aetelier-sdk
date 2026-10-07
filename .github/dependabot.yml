@@ -12,9 +12,6 @@ updates:
       interval: weekly
     open-pull-requests-limit: 0
 
-  # dtolnay/rust-toolchain is pinned to the declared MSRV in the msrv job.
-  # Bumping it would silently raise the floor the job exists to defend, so it
-  # is updated by hand alongside rust-version in Cargo.toml.
   - package-ecosystem: github-actions
     directory: /
     schedule:
