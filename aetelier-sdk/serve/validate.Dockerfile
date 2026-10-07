@@ -7,14 +7,14 @@
 # can compute deltas across runs.
 #
 # Build context: the parent of this repository
-#   docker build -t aetelier-validate:v0.1.0 \
+#   docker build -t aetelier-validate:v0.1.1 \
 #                -f aetelier-sdk/aetelier-sdk/serve/validate.Dockerfile .
 #
 # Run on demand:
 #   docker run --rm \
 #     -v /var/lib/aetelier/datasets:/data:ro \
 #     -v /var/lib/aetelier/validate-state:/state \
-#     aetelier-validate:v0.1.0 \
+#     aetelier-validate:v0.1.1 \
 #     --flush-threshold 3600 --grid-period-us 100000 --verbose
 #
 # Notes
@@ -44,6 +44,7 @@ COPY aetelier-sdk/aetelier-connect/Cargo.toml    aetelier-sdk/aetelier-connect/
 COPY aetelier-sdk/aetelier-io/Cargo.toml         aetelier-sdk/aetelier-io/
 COPY aetelier-sdk/aetelier-types/Cargo.toml      aetelier-sdk/aetelier-types/
 COPY aetelier-sdk/aetelier-telemetry/Cargo.toml  aetelier-sdk/aetelier-telemetry/
+COPY aetelier-sdk/aetelier-entrepot/Cargo.toml   aetelier-sdk/aetelier-entrepot/
 
 # Stub layout for cargo dep cache.
 RUN mkdir -p aetelier-sdk/aetelier-sdk/src \
@@ -52,11 +53,13 @@ RUN mkdir -p aetelier-sdk/aetelier-sdk/src \
              aetelier-sdk/aetelier-io/src \
              aetelier-sdk/aetelier-types/src \
              aetelier-sdk/aetelier-telemetry/src \
+             aetelier-sdk/aetelier-entrepot/src \
     && touch aetelier-sdk/aetelier-sdk/src/lib.rs \
              aetelier-sdk/aetelier-connect/src/lib.rs \
              aetelier-sdk/aetelier-io/src/lib.rs \
              aetelier-sdk/aetelier-types/src/lib.rs \
              aetelier-sdk/aetelier-telemetry/src/lib.rs \
+             aetelier-sdk/aetelier-entrepot/src/lib.rs \
     && echo 'fn main(){}' > aetelier-sdk/aetelier-sdk/src/bin/validate.rs
 
 RUN cd aetelier-sdk && cargo build --release \

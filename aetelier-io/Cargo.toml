@@ -70,8 +70,8 @@ path = "tests/registry/test_schema_fingerprints.rs"
 required-features = ["parquet"]
 
 [dependencies]
-aetelier-connect = { path = "../aetelier-connect", version = "0.1.0", optional = true }
-aetelier-types = { path = "../aetelier-types", version = "0.1.0" }
+aetelier-connect = { path = "../aetelier-connect", version = "0.1.1", optional = true }
+aetelier-types = { path = "../aetelier-types", version = "0.1.1" }
 
 arrow = { version = "57.2", optional = true }
 async-trait = { version = "0.1" }

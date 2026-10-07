@@ -74,7 +74,7 @@ pub struct GapLedger {
 
 impl GapLedger {
     /// Build the ledger for a worker writing under `output_dir` (the parquet
-    /// sink dir). On the wave layout (gticket_0039 D6) — a platform dir
+    /// sink dir). On the day-bounded layout — a platform dir
     /// `datasets/recorded/<exchange>/<market_type>/{data_type}/<binding_id>` —
     /// the ledger moves OUT of the market tree to the sibling gaps area:
     /// `<root>/gaps/<binding_id>_gap_ledger.jsonl`, where `<root>` is the

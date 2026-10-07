@@ -8,8 +8,8 @@
 //! `aetelier-md-worker` Docker image), this binary wires
 //! [`aetelier_io::ParquetSnapshotFlusher`] into the per-worker sink set so
 //! that `[[collect.output]] type = "parquet"` entries in the manifest
-//! actually persist `orderbooks/`, `trades/`, `liquidations/`, `fundings/`,
-//! and `open_interests/` parquet files to disk. Without that wiring, the
+//! actually persist `orderbooks/`, `trades/`, `liquidations/`, `funding_rates/`,
+//! `funding_settlements/` and `open_interests/` parquet files to disk. Without that wiring, the
 //! parquet sink is silently dropped at sink-build time (see
 //! `aetelier_connect::workers::output::build_sinks`).
 //!

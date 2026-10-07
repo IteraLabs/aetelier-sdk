@@ -64,7 +64,7 @@ Depend on the workspace via git, pinned to the release tag:
 
 ```toml
 [dependencies]
-aetelier-sdk = { git = "https://github.com/IteraLabs/aetelier-sdk", tag = "v0.1.0", features = ["parquet"] }
+aetelier-sdk = { git = "https://github.com/IteraLabs/aetelier-sdk", tag = "v0.1.1", features = ["parquet"] }
 ```
 
 The six crates carry the layout and publish order for a registry release; [CONTRIBUTING.md](CONTRIBUTING.md) documents both.

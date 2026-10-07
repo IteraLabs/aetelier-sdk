@@ -21,7 +21,7 @@ dependencies = [
 
 [[package]]
 name = "aetelier-connect"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "aetelier-entrepot",
  "aetelier-io",
@@ -55,7 +55,7 @@ dependencies = [
 
 [[package]]
 name = "aetelier-entrepot"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "chrono",
@@ -75,7 +75,7 @@ dependencies = [
 
 [[package]]
 name = "aetelier-io"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "aetelier-connect",
  "aetelier-types",
@@ -99,7 +99,7 @@ dependencies = [
 
 [[package]]
 name = "aetelier-sdk"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "aetelier-connect",
  "aetelier-entrepot",
@@ -121,7 +121,7 @@ dependencies = [
 
 [[package]]
 name = "aetelier-telemetry"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "opentelemetry",
  "opentelemetry-otlp",
@@ -139,7 +139,7 @@ dependencies = [
 
 [[package]]
 name = "aetelier-types"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "chrono",
  "getrandom 0.3.4",

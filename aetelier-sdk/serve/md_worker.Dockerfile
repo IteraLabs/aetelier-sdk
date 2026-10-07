@@ -1,6 +1,6 @@
 # md_worker.Dockerfile
 #
-# Standalone market-data collector for v0.1.0 deployment.
+# Standalone market-data collector for v0.1.1 deployment.
 # Builds the aetelier-sdk `md_worker` binary; runs with a TOML manifest
 # mounted at /configs/manifest.toml, writes parquet to /data.
 #
@@ -12,7 +12,7 @@
 # `aetelier-connect::workers::output::build_sinks`.
 #
 # Build context: the parent of this repository
-#   docker build -t aetelier-md-worker:v0.1.0 \
+#   docker build -t aetelier-md-worker:v0.1.1 \
 #                -f aetelier-sdk/aetelier-sdk/serve/md_worker.Dockerfile .
 
 # ── Stage 1: builder ──────────────────────────────────────────────────────────
@@ -32,6 +32,7 @@ COPY aetelier-sdk/aetelier-connect/Cargo.toml    aetelier-sdk/aetelier-connect/
 COPY aetelier-sdk/aetelier-io/Cargo.toml         aetelier-sdk/aetelier-io/
 COPY aetelier-sdk/aetelier-types/Cargo.toml      aetelier-sdk/aetelier-types/
 COPY aetelier-sdk/aetelier-telemetry/Cargo.toml  aetelier-sdk/aetelier-telemetry/
+COPY aetelier-sdk/aetelier-entrepot/Cargo.toml   aetelier-sdk/aetelier-entrepot/
 
 # Stub layout for cargo dep cache.
 RUN mkdir -p aetelier-sdk/aetelier-sdk/src \
@@ -40,11 +41,13 @@ RUN mkdir -p aetelier-sdk/aetelier-sdk/src \
              aetelier-sdk/aetelier-io/src \
              aetelier-sdk/aetelier-types/src \
              aetelier-sdk/aetelier-telemetry/src \
+             aetelier-sdk/aetelier-entrepot/src \
     && touch aetelier-sdk/aetelier-sdk/src/lib.rs \
              aetelier-sdk/aetelier-connect/src/lib.rs \
              aetelier-sdk/aetelier-io/src/lib.rs \
              aetelier-sdk/aetelier-types/src/lib.rs \
              aetelier-sdk/aetelier-telemetry/src/lib.rs \
+             aetelier-sdk/aetelier-entrepot/src/lib.rs \
     && echo 'fn main(){}' > aetelier-sdk/aetelier-sdk/src/bin/md_worker.rs
 
 RUN cd aetelier-sdk && cargo build --release \

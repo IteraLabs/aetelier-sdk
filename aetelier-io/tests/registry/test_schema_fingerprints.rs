@@ -1,13 +1,11 @@
-//! Registry schema-fingerprint conformance (gticket_0038 D7, Option 2).
+//! Schema-fingerprint conformance.
 //!
 //! Each canonical datatype's REAL parquet writer produces a sample file; the
 //! footer's parquet schema is canonicalized through the parquet schema
 //! printer and sha256-hashed. The six fingerprints must equal the committed
-//! artifact `aetelier-io/schemas.fingerprints.json`, which the registry
-//! (`aetelier-vault .../txy/registry/registry.json`) mirrors and the infra
-//! producer-walk diffs. A writer layout change — including a positional
-//! append — changes the fingerprint and fails here until a new schema_id
-//! version is minted.
+//! artifact `aetelier-io/schemas.fingerprints.json`. A writer layout change —
+//! including a positional append — changes the fingerprint and fails here
+//! until a new schema_id version is minted.
 
 #[cfg(feature = "parquet")]
 mod fingerprints {

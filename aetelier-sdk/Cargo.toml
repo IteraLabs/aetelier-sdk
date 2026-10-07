@@ -44,11 +44,11 @@ path = "src/bin/rehydrate.rs"
 required-features = ["parquet"]
 
 [dependencies]
-aetelier-connect = { path = "../aetelier-connect", version = "0.1.0" }
-aetelier-entrepot = { path = "../aetelier-entrepot", version = "0.1.0" }
-aetelier-io = { path = "../aetelier-io", version = "0.1.0" }
-aetelier-telemetry = { path = "../aetelier-telemetry", version = "0.1.0" }
-aetelier-types = { path = "../aetelier-types", version = "0.1.0" }
+aetelier-connect = { path = "../aetelier-connect", version = "0.1.1" }
+aetelier-entrepot = { path = "../aetelier-entrepot", version = "0.1.1" }
+aetelier-io = { path = "../aetelier-io", version = "0.1.1" }
+aetelier-telemetry = { path = "../aetelier-telemetry", version = "0.1.1" }
+aetelier-types = { path = "../aetelier-types", version = "0.1.1" }
 
 anyhow = { version = "1.0" }
 chrono = { version = "0.4" }

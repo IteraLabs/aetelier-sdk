@@ -52,7 +52,7 @@ pub struct IndexEntry {
     pub t_min_us: u64,
     /// Largest snapshot `ts_us` in the flushed batch.
     pub t_max_us: u64,
-    /// Registry-minted schema id (`<datatype>.v1`, gticket_0038 D5/D7); the
+    /// Registry-minted schema id (`<datatype>.v1`); the
     /// registry row for it carries the parquet-schema fingerprint.
     pub schema_id: String,
 }

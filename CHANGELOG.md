@@ -8,8 +8,12 @@ entry is edited only to correct a factual error, never to restate its scope.
 
 ### Promotions
 
+## v0.1.1 — 2026-10-06
+
+### Promotions
+
 - 2026-10-06 · `fix/validate-filename-and-span-units` (#26) — grid-stamped book rows; microsecond file stamps; `validate` aligned with the writers.
-- 2026-10-06 · `chore/rust-1.99-lints` — Rust 1.99.0 toolchain pin; async-trait 0.1.92; `aetelier-connect` `md_worker` stub removed.
+- 2026-10-06 · `chore/rust-1.99-lints` (#27) — Rust 1.99.0 toolchain pin; async-trait 0.1.92; `aetelier-connect` `md_worker` stub removed.
 - 2026-08-22 · `staging` (#14) — staging promoted to `main`.
 - 2026-08-22 · `chore/pr-template` (#13) — pull-request template gains evidence sections.
 - 2026-08-22 · `fix/storage-type-correctness` (#12) — decode bounds, archive client deadlines, delta column declaration order.

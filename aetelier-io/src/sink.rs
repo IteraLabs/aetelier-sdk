@@ -41,7 +41,7 @@ fn file_bytes(path: &std::path::Path) -> Result<u64, PersistError> {
     Ok(std::fs::metadata(path)?.len())
 }
 
-/// Resolves the leaf directory for one datatype (gticket_0039 D2/D10). A
+/// Resolves the leaf directory for one datatype. A
 /// platform-composed dir carries the LITERAL `{data_type}` placeholder
 /// (`datasets/recorded/<exchange>/<market_type>/{data_type}/<binding_id>`):
 /// the placeholder is substituted and a UTC day segment derived from the
