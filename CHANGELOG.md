@@ -8,6 +8,7 @@ entry is edited only to correct a factual error, never to restate its scope.
 
 ### Promotions
 
+- 2026-10-06 · `fix/validate-filename-and-span-units` (#26) — grid-stamped book rows; microsecond file stamps; `validate` aligned with the writers.
 - 2026-10-06 · `chore/rust-1.99-lints` — Rust 1.99.0 toolchain pin; async-trait 0.1.92; `aetelier-connect` `md_worker` stub removed.
 - 2026-08-22 · `staging` (#14) — staging promoted to `main`.
 - 2026-08-22 · `chore/pr-template` (#13) — pull-request template gains evidence sections.
@@ -21,17 +22,23 @@ entry is edited only to correct a factual error, never to restate its scope.
 ### Fixed
 
 - Delta orderbook Parquet declared its `side` and `exchange` columns in the opposite order to the values it wrote, so every consumer resolving by column name read exchange strings as sides and sides as exchanges. The declaration now matches the data, the sibling snapshot writer, and both readers. Readers that resolve positionally — including this crate's own — are unaffected in either direction, since no byte position moved; positional tolerance cannot express a rename, so a file written before this fix is identified by its embedded schema, where `side` precedes `exchange`.
+- `validate` T03 rejected every writer file; T05 rejected every full book file.
+- Funding-settlement file names replace `:` like the other writers.
 
 ### Added
 
 - Decode bounds on untrusted input: a gzip WebSocket frame that inflates past 64 MiB and an archive object that decompresses past 256 MiB are refused rather than allocated, so a compression bomb cannot exhaust a long-running collector.
 - Deadlines on the archive HTTP client: a 15 s connect bound so a black-holed endpoint surfaces instead of parking, and a 30 s idle-read bound that fires only when no bytes arrive. No total request timeout is set, so multi-gigabyte object downloads are never killed mid-transfer.
+- `aetelier_io::naming` (`file_name`, `parse_file_name`, `FileKind`) and `Orderbook::effective_ts_us`.
 
 ### Changed
 
 - A failed response-body read on the archive path is now classified and retried by the same transport policy as a failed send, instead of terminating the run; the two paths share one retry budget.
 - Builds use Rust 1.99.0 via `rust-toolchain.toml`; MSRV stays 1.88.0.
 - `aetelier-connect` no longer ships an `md_worker` binary; run `aetelier-sdk`'s.
+- Parquet book rows carry the grid tick in `orderbook_ts_us` (never earlier than the book); venue time stays in `source_orderbook_ts_us`.
+- Per-symbol writer file stamps are the earliest row time in µs (v0.1.0: write time in ms); `parse_file_name` reads both.
+- `validate` takes `--grid-period-us`; `serve/run_validate.sh` reads `AETELIER_GRID_PERIOD_US`; report field `span_ms` is `span_us`.
 
 ## v0.1.0 — 2026-07-30
 
