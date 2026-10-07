@@ -7,8 +7,8 @@
 //! ```text
 //! /data
 //! ├── binance/
-//! │   ├── orderbooks/<SYMBOL>_ob_sync_<ts>.parquet
-//! │   └── trades/<SYMBOL>_trades_sync_<ts>.parquet
+//! │   ├── orderbooks/<exchange>_<symbol>_ob_sync_<YYYYMMDD>_<HHMMSS.uuuuuu>[-N].parquet
+//! │   └── trades/<exchange>_<symbol>_trades_sync_<YYYYMMDD>_<HHMMSS.uuuuuu>[-N].parquet
 //! ├── coinbase/...
 //! └── kraken/...
 //! ```
@@ -45,6 +45,7 @@ use clap::Parser;
 use serde::{Deserialize, Serialize};
 use tracing_subscriber::EnvFilter;
 
+use aetelier_io::naming::{FileKind, FileName, parse_file_name};
 use aetelier_io::orderbooks::read_ob_parquet;
 use aetelier_io::trades::read_trades_parquet;
 use aetelier_types::orderbooks::{Orderbook, OrderbookTarget, OrderbookTargetData};
@@ -75,10 +76,10 @@ struct Cli {
     #[arg(long, default_value_t = 3600)]
     flush_threshold: u64,
 
-    /// Grid period in milliseconds. Combine with `flush_threshold` to
-    /// compute `expected_span_ms = flush_threshold * grid_period_ms`.
-    #[arg(long, default_value_t = 100)]
-    grid_period_ms: u64,
+    /// Grid period in microseconds. The expected file span is
+    /// `(flush_threshold - 1) * grid_period_us`.
+    #[arg(long, default_value_t = 100_000)]
+    grid_period_us: u64,
 
     /// Tolerance for the flush-span test, as a fraction of the
     /// expected span (default 0.20 → ±20 %).
@@ -116,7 +117,7 @@ enum TestId {
     FilesPresent,
     /// T02: each parquet file is non-empty (size > 0, ≥1 row).
     FileNonEmpty,
-    /// T03: filename matches `<SYMBOL>_<kind>_sync_<ts>.parquet`.
+    /// T03: filename matches `<exchange>_<symbol>_<kind>_sync_<YYYYMMDD>_<HHMMSS.uuuuuu>[-N].parquet`.
     FilenameConvention,
     /// T04: distinct timestamps within a file are non-decreasing.
     MonotonicTimestamps,
@@ -198,7 +199,7 @@ struct FileReport {
     distinct_ts_count: u64,
     first_ts: u64,
     last_ts: u64,
-    span_ms: u64,
+    span_us: u64,
     failed: Vec<&'static str>,
 }
 
@@ -254,7 +255,7 @@ struct ExchangeStats {
 // Entry point
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Per-(exchange, symbol, kind) accumulator of (rows, span_ms, filename).
+/// Per-(exchange, symbol, kind) accumulator of (first_ts, last_ts, filename).
 type PerGroupRows = BTreeMap<(String, String, DataKind), Vec<(u64, u64, String)>>;
 
 /// `(row_count, distinct_ts, first_ts, last_ts, monotonic, failed_codes)`.
@@ -331,14 +332,14 @@ fn main() -> Result<()> {
                         FileReport {
                             path: path_str.clone(),
                             exchange: ex.clone(),
-                            symbol: parse_symbol_from_filename(&path).unwrap_or_default(),
+                            symbol: group_symbol(&path),
                             kind,
                             size_bytes: size,
                             row_count: 0,
                             distinct_ts_count: 0,
                             first_ts: 0,
                             last_ts: 0,
-                            span_ms: 0,
+                            span_us: 0,
                             failed: vec![TestId::FileNonEmpty.code()],
                         }
                     }
@@ -477,7 +478,7 @@ fn validate_file(
     if !filename_ok {
         failed.push(TestId::FilenameConvention.code());
     }
-    let symbol = parse_symbol_from_filename(path).unwrap_or_default();
+    let symbol = group_symbol(path);
 
     // Read & dispatch
     let (row_count, distinct_ts, first_ts, last_ts, monotonic, sub_failed) = match kind {
@@ -495,18 +496,18 @@ fn validate_file(
         failed.push(TestId::MonotonicTimestamps.code());
     }
     // T05: flush span
-    let expected_span =
-        (cli.flush_threshold.saturating_sub(1) * cli.grid_period_ms) as f64;
-    let span_ms = last_ts.saturating_sub(first_ts);
-    if expected_span > 0.0 {
-        let lo = expected_span * (1.0 - cli.span_tolerance);
-        let hi = expected_span * (1.0 + cli.span_tolerance);
+    let expected_span_us =
+        (cli.flush_threshold.saturating_sub(1) * cli.grid_period_us) as f64;
+    let span_us = last_ts.saturating_sub(first_ts);
+    if expected_span_us > 0.0 {
+        let lo = expected_span_us * (1.0 - cli.span_tolerance);
+        let hi = expected_span_us * (1.0 + cli.span_tolerance);
         // For trade files we only assert the upper bound (trades are
         // sparse — flushes can land on files with few trades that span
         // less than the full window).
         let in_range = match kind {
-            DataKind::Orderbook => (span_ms as f64) >= lo && (span_ms as f64) <= hi,
-            DataKind::Trades => (span_ms as f64) <= hi,
+            DataKind::Orderbook => (span_us as f64) >= lo && (span_us as f64) <= hi,
+            DataKind::Trades => (span_us as f64) <= hi,
         };
         if !in_range {
             failed.push(TestId::FlushSpan.code());
@@ -523,7 +524,7 @@ fn validate_file(
         distinct_ts_count: distinct_ts,
         first_ts,
         last_ts,
-        span_ms,
+        span_us,
         failed,
     })
 }
@@ -759,10 +760,10 @@ fn print_report(
     println!("│ expect_exchanges  : {}", cli.expect_exchanges.join(", "));
     println!("│ found_exchanges   : {}", exchanges.join(", "));
     println!(
-        "│ flush_threshold   : {} (× {} ms grid → ~{:.1} s window)",
+        "│ flush_threshold   : {} (× {} µs grid → ~{:.1} s window)",
         cli.flush_threshold,
-        cli.grid_period_ms,
-        (cli.flush_threshold * cli.grid_period_ms) as f64 / 1000.0
+        cli.grid_period_us,
+        (cli.flush_threshold * cli.grid_period_us) as f64 / 1_000_000.0
     );
     println!("├──────────────────────── this run ──────────────────────────────────");
     println!("│ files_seen        : {}", summary.files_seen);
@@ -796,17 +797,17 @@ fn print_report(
     if cli.verbose {
         println!("├──────────────────────── per-file ──────────────────────────────────");
         println!(
-            "│  {:<8} {:<10} {:<8} {:>10} {:>8} {:>14} failed",
-            "exchange", "symbol", "kind", "rows", "span_ms", "size"
+            "│  {:<8} {:<10} {:<8} {:>10} {:>12} {:>14} failed",
+            "exchange", "symbol", "kind", "rows", "span_us", "size"
         );
         for f in files {
             println!(
-                "│  {:<8} {:<10} {:<8} {:>10} {:>8} {:>14} {}",
+                "│  {:<8} {:<10} {:<8} {:>10} {:>12} {:>14} {}",
                 f.exchange,
                 f.symbol,
                 f.kind.dir_name(),
                 f.row_count,
-                f.span_ms,
+                f.span_us,
                 human_bytes(f.size_bytes),
                 if f.failed.is_empty() {
                     "·".to_string()
@@ -901,42 +902,30 @@ fn parquet_files_in(dir: &Path) -> Vec<PathBuf> {
     out
 }
 
-/// Filename convention: `<SYMBOL>_<TAG>_sync_<TS>.parquet`, with TAG in
-/// {`ob`, `trades`, `liquidations`, `funding`, `oi`}.  The first two
-/// are what `md_worker` actively writes today; the others are
-/// validated for free if/when their feed is enabled.
+fn file_name_of(path: &Path) -> Option<FileName<'_>> {
+    parse_file_name(path.file_name()?.to_str()?)
+}
+
 fn matches_convention(path: &Path, kind: DataKind) -> bool {
-    let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
-        return false;
+    let expected_kind = match kind {
+        DataKind::Orderbook => FileKind::Orderbook,
+        DataKind::Trades => FileKind::Trades,
     };
-    let Some(stem) = name.strip_suffix(".parquet") else {
-        return false;
-    };
-    let parts: Vec<&str> = stem.split('_').collect();
-    if parts.len() < 4 {
-        return false;
-    }
-    if parts[parts.len() - 2] != "sync" {
-        return false;
-    }
-    let tag_idx = parts.len() - 3;
-    let tag = parts[tag_idx];
-    match kind {
-        DataKind::Orderbook => tag == "ob",
-        DataKind::Trades => tag == "trades",
-    }
+    file_name_of(path)
+        .is_some_and(|name| name.mode == "sync" && name.kind == expected_kind)
 }
 
 fn parse_symbol_from_filename(path: &Path) -> Option<String> {
-    let name = path.file_name()?.to_str()?;
-    let stem = name.strip_suffix(".parquet")?;
-    let parts: Vec<&str> = stem.split('_').collect();
-    if parts.len() < 4 {
-        return None;
-    }
-    // Symbol is everything before the `<tag>_sync_<ts>` suffix.
-    let tag_idx = parts.len() - 3;
-    Some(parts[..tag_idx].join("_"))
+    file_name_of(path).map(|name| name.symbol.to_string())
+}
+
+fn group_symbol(path: &Path) -> String {
+    parse_symbol_from_filename(path).unwrap_or_else(|| {
+        path.file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or_default()
+            .to_string()
+    })
 }
 
 fn file_basename(path: &str) -> String {
@@ -976,22 +965,30 @@ fn human_bytes(n: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use aetelier_io::orderbooks::write_ob_parquet;
+    use aetelier_types::levels::Level;
+    use aetelier_types::orders::OrderSide;
+    use aetelier_types::trading_pair::TradingPair;
+    use rust_decimal::Decimal;
     use std::path::PathBuf;
 
     #[test]
     fn convention_orderbook() {
         let p = PathBuf::from(
-            "/data/binance/orderbooks/BTCUSDC_ob_sync_1700000000000.parquet",
+            "/data/binance/orderbooks/binance_NVDAB-USDT_ob_sync_20261006_211107.680123.parquet",
         );
         assert!(matches_convention(&p, DataKind::Orderbook));
         assert!(!matches_convention(&p, DataKind::Trades));
-        assert_eq!(parse_symbol_from_filename(&p).as_deref(), Some("BTCUSDC"));
+        assert_eq!(
+            parse_symbol_from_filename(&p).as_deref(),
+            Some("NVDAB-USDT")
+        );
     }
 
     #[test]
     fn convention_trades_with_dashes() {
         let p = PathBuf::from(
-            "/data/coinbase/trades/BTC-USDC_trades_sync_1700000000000.parquet",
+            "/data/coinbase/trades/coinbase_BTC-USDC_trades_sync_20261006_212927.433456.parquet",
         );
         assert!(matches_convention(&p, DataKind::Trades));
         assert!(!matches_convention(&p, DataKind::Orderbook));
@@ -999,9 +996,118 @@ mod tests {
     }
 
     #[test]
+    fn convention_symbol_with_underscore() {
+        let p = PathBuf::from(
+            "/data/hyperliquid/orderbooks/hyperliquid_xyz_TSLA-USDC_ob_sync_20261006_211107.680123.parquet",
+        );
+        assert!(matches_convention(&p, DataKind::Orderbook));
+        assert_eq!(
+            parse_symbol_from_filename(&p).as_deref(),
+            Some("xyz_TSLA-USDC")
+        );
+    }
+
+    #[test]
+    fn convention_accepts_v0_1_0_millisecond_names() {
+        let p = PathBuf::from(
+            "/data/binance/orderbooks/binance_BTC-USDT_ob_sync_20261006_211107.680.parquet",
+        );
+        assert!(matches_convention(&p, DataKind::Orderbook));
+    }
+
+    #[test]
+    fn unparseable_files_group_by_their_own_stem() {
+        let p = PathBuf::from(
+            "/data/binance/trades/binance_BTC-USDT_trades_rehydrated_20261006_211107.parquet",
+        );
+        assert!(!matches_convention(&p, DataKind::Trades));
+        assert_eq!(
+            group_symbol(&p),
+            "binance_BTC-USDT_trades_rehydrated_20261006_211107"
+        );
+    }
+
+    #[test]
     fn convention_rejects_missing_sync_marker() {
-        let p =
-            PathBuf::from("/data/binance/orderbooks/BTCUSDC_ob_1700000000000.parquet");
+        let p = PathBuf::from(
+            "/data/binance/orderbooks/binance_BTC-USDT_ob_20261006_211107.680123.parquet",
+        );
         assert!(!matches_convention(&p, DataKind::Orderbook));
+    }
+
+    #[test]
+    fn convention_rejects_raw_mode() {
+        let p = PathBuf::from(
+            "/data/binance/orderbooks/binance_BTC-USDT_ob_raw_20261006_211107.680123.parquet",
+        );
+        assert!(!matches_convention(&p, DataKind::Orderbook));
+    }
+
+    #[test]
+    fn convention_accepts_collision_siblings() {
+        let p = PathBuf::from(
+            "/data/binance/orderbooks/binance_BTC-USDT_ob_sync_20261006_211107.680123-1.parquet",
+        );
+        assert!(matches_convention(&p, DataKind::Orderbook));
+        assert_eq!(parse_symbol_from_filename(&p).as_deref(), Some("BTC-USDT"));
+    }
+
+    fn grid_orderbooks(count: u64, start_us: u64, grid_period_us: u64) -> Vec<Orderbook> {
+        let pair = TradingPair::new("NVDAB", "USDT");
+        (0..count)
+            .map(|i| {
+                Orderbook::from_levels(
+                    i as u32,
+                    start_us + i * grid_period_us,
+                    pair.clone(),
+                    "binance".to_string(),
+                    vec![Level::new(
+                        0,
+                        OrderSide::Bids,
+                        Decimal::new(18000, 2),
+                        Decimal::ONE,
+                        vec![],
+                    )],
+                    vec![Level::new(
+                        0,
+                        OrderSide::Asks,
+                        Decimal::new(18010, 2),
+                        Decimal::ONE,
+                        vec![],
+                    )],
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn writer_output_passes_every_file_check() {
+        let dir = tempfile::tempdir().unwrap();
+        let books = grid_orderbooks(300, 1_791_321_067_600_000, 100_000);
+        let path = write_ob_parquet(&books, dir.path(), "sync").unwrap();
+        let size_bytes = fs::metadata(&path).unwrap().len();
+        let cli = Cli::parse_from(["validate", "--flush-threshold", "300"]);
+
+        let report =
+            validate_file(&path, "binance", DataKind::Orderbook, size_bytes, &cli)
+                .unwrap();
+
+        assert_eq!(report.failed, Vec::<&str>::new());
+        assert_eq!(report.symbol, "NVDAB-USDT");
+    }
+
+    #[test]
+    fn span_outside_tolerance_fails_flush_span() {
+        let dir = tempfile::tempdir().unwrap();
+        let books = grid_orderbooks(300, 1_791_321_067_600_000, 200_000);
+        let path = write_ob_parquet(&books, dir.path(), "sync").unwrap();
+        let size_bytes = fs::metadata(&path).unwrap().len();
+        let cli = Cli::parse_from(["validate", "--flush-threshold", "300"]);
+
+        let report =
+            validate_file(&path, "binance", DataKind::Orderbook, size_bytes, &cli)
+                .unwrap();
+
+        assert_eq!(report.failed, vec![TestId::FlushSpan.code()]);
     }
 }
