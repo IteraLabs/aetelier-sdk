@@ -25,7 +25,17 @@ pub fn decompose_snapshots(snapshots: &[MarketSnapshot]) -> DecomposedSnapshots 
 
     for snap in snapshots {
         if let Some(ob) = &snap.orderbook {
-            out.orderbooks.push(ob.clone());
+            let unsourced =
+                ob.source_orderbook_ts_us == 0 && ob.local_orderbook_ts_us == 0;
+            out.orderbooks.push(Orderbook {
+                orderbook_ts_us: snap.ts_us.max(ob.orderbook_ts_us),
+                source_orderbook_ts_us: if unsourced {
+                    ob.orderbook_ts_us
+                } else {
+                    ob.source_orderbook_ts_us
+                },
+                ..ob.clone()
+            });
         }
         out.trades.extend(snap.trades.iter().cloned());
         out.liquidations.extend(snap.liquidations.iter().cloned());
@@ -175,5 +185,106 @@ mod tests {
             .map(|f| f.funding_time_us)
             .collect();
         assert_eq!(times, vec![3_600_000_000, 7_200_000_000]);
+    }
+
+    #[test]
+    fn carried_forward_books_take_their_grid_tick_and_keep_venue_time() {
+        let venue_ts = 1_791_321_096_929_000;
+        let mut book = Orderbook::new(
+            0,
+            venue_ts,
+            TradingPair::new("NVDAB", "USDT"),
+            "binance".to_string(),
+            std::collections::BTreeMap::new(),
+            std::collections::BTreeMap::new(),
+        );
+        book.source_orderbook_ts_us = venue_ts;
+        let mut snap_a = MarketSnapshot::empty(1_791_321_097_000_000);
+        snap_a.orderbook = Some(book.clone());
+        let mut snap_b = MarketSnapshot::empty(1_791_321_097_100_000);
+        snap_b.orderbook = Some(book);
+
+        let out = decompose_snapshots(&[snap_a, snap_b]);
+        let stamps: Vec<(u64, u64)> = out
+            .orderbooks
+            .iter()
+            .map(|o| (o.orderbook_ts_us, o.source_orderbook_ts_us))
+            .collect();
+        assert_eq!(
+            stamps,
+            vec![
+                (1_791_321_097_000_000, venue_ts),
+                (1_791_321_097_100_000, venue_ts)
+            ]
+        );
+    }
+
+    #[test]
+    fn a_book_newer_than_its_tick_keeps_its_own_time() {
+        let venue_ts = 1_791_321_097_142_000;
+        let mut book = Orderbook::new(
+            0,
+            venue_ts,
+            TradingPair::new("NVDAB", "USDT"),
+            "binance".to_string(),
+            std::collections::BTreeMap::new(),
+            std::collections::BTreeMap::new(),
+        );
+        book.source_orderbook_ts_us = venue_ts;
+        let mut terminal = MarketSnapshot::empty(1_791_321_097_100_000);
+        terminal.orderbook = Some(book);
+
+        let out = decompose_snapshots(&[terminal]);
+        assert_eq!(out.orderbooks[0].orderbook_ts_us, venue_ts);
+    }
+
+    #[test]
+    fn rest_seeded_books_keep_their_receipt_time() {
+        let mut book = Orderbook::new(
+            0,
+            1_791_321_096_990_000,
+            TradingPair::new("BTC", "USDT"),
+            "binance".to_string(),
+            std::collections::BTreeMap::new(),
+            std::collections::BTreeMap::new(),
+        );
+        book.local_orderbook_ts_us = 1_791_321_096_950_000;
+        let mut snap = MarketSnapshot::empty(1_791_321_097_000_000);
+        snap.orderbook = Some(book);
+
+        let row = &decompose_snapshots(&[snap]).orderbooks[0];
+        assert_eq!(
+            (
+                row.orderbook_ts_us,
+                row.source_orderbook_ts_us,
+                row.local_orderbook_ts_us
+            ),
+            (1_791_321_097_000_000, 0, 1_791_321_096_950_000)
+        );
+        assert_eq!(row.effective_ts_us(), 1_791_321_096_950_000);
+    }
+
+    #[test]
+    fn books_without_provenance_keep_their_venue_time_as_source() {
+        let venue_ts = 1_791_321_096_929_000;
+        let book = Orderbook::new(
+            0,
+            venue_ts,
+            TradingPair::new("BTC", "USDT"),
+            "bybit".to_string(),
+            std::collections::BTreeMap::new(),
+            std::collections::BTreeMap::new(),
+        );
+        let mut snap = MarketSnapshot::empty(1_791_321_097_000_000);
+        snap.orderbook = Some(book);
+
+        let out = decompose_snapshots(&[snap]);
+        assert_eq!(
+            (
+                out.orderbooks[0].orderbook_ts_us,
+                out.orderbooks[0].source_orderbook_ts_us
+            ),
+            (1_791_321_097_000_000, venue_ts)
+        );
     }
 }

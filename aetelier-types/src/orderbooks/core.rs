@@ -31,8 +31,11 @@ use crate::TimestampUs;
 pub struct Orderbook {
     /// Unique identifier for this orderbook snapshot.
     pub orderbook_id: u32,
-    /// Timestamp of the orderbook snapshot. A synchronizer re-stamps this to
-    /// its grid period; for the raw exchange time use `source_orderbook_ts_us`.
+    /// Snapshot timestamp (µs). In rows `aetelier-io` decomposes from synchronized snapshots
+    /// (the Parquet flushers): the grid tick, or the book's own time when the book is newer.
+    /// In books held by `MarketSynchronizer`: venue time of the last applied update, else
+    /// local wall-clock time at emission.
+    /// Event time is [`Orderbook::effective_ts_us`].
     pub orderbook_ts_us: u64,
     /// Exchange-reported event time (µs) of the last applied delta, preserved
     /// through synchronization. 0 if the venue gives no event time.
@@ -116,6 +119,16 @@ impl Orderbook {
     }
 
     // ------------------------------------------------------------------- Accessors -- //
+
+    /// Event time (µs): `source_orderbook_ts_us`, else `local_orderbook_ts_us`,
+    /// else `orderbook_ts_us`.
+    #[inline]
+    pub fn effective_ts_us(&self) -> u64 {
+        [self.source_orderbook_ts_us, self.local_orderbook_ts_us]
+            .into_iter()
+            .find(|ts| *ts > 0)
+            .unwrap_or(self.orderbook_ts_us)
+    }
 
     /// Best bid price (highest). `None` if no bids.
     #[inline]

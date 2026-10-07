@@ -236,14 +236,14 @@ pub fn read_trades_parquet(_path: &Path) -> Result<Vec<Trade>, PersistError> {
 ///
 /// # Filename convention
 ///
-/// Output file: `{SYMBOL}_trades_{MODE}_{TIMESTAMP}.parquet`
+/// Output file: `{EXCHANGE}_{SYMBOL}_trades_{MODE}_{TIMESTAMP}.parquet`
 ///
-/// The symbol is sanitised for filesystem safety (`/` → `-`), so Kraken's
+/// The symbol is sanitised for filesystem safety (`/` → `-`, `:` → `_`), so Kraken's
 /// `BTC/USDT` becomes `BTC-USDT` in the filename while the Parquet data
 /// retains the original symbol string.
 ///
-/// Examples: `BTCUSDT_trades_sync_20260226_153000.123.parquet`,
-///           `BTC-USDT_trades_sync_20260226_153000.123.parquet`
+/// Examples: `bybit_ETH-USDT_trades_sync_20260226_153000.123456.parquet`,
+///           `kraken_BTC-USDT_trades_sync_20260226_153000.123456.parquet`
 ///
 /// # Arguments
 ///
@@ -274,11 +274,12 @@ pub fn write_trades_parquet_timestamped(
         .map(|t| t.exchange.as_str())
         .unwrap_or("unknown");
 
-    let symbol = raw_symbol.replace('/', "-").replace(':', "_");
-
-    let filename = format!(
-        "{}_{}_trades_{}_{}.parquet",
-        exchange, symbol, mode, file_ts
+    let filename = crate::naming::file_name(
+        exchange,
+        &raw_symbol,
+        crate::naming::FileKind::Trades,
+        mode,
+        file_ts,
     );
     let path = crate::naming::unique_path(output_dir, &filename);
 

@@ -37,8 +37,9 @@ pub(crate) mod parquet_err {
     }
 }
 
+/// Parquet file-name contract shared by the writers and their readers.
+pub mod naming;
 /// Orderbook I/O (Parquet, CSV, JSON, terminal)
-pub(crate) mod naming;
 pub mod orderbooks;
 
 /// Trade I/O (Parquet)

@@ -15,7 +15,7 @@
 #     -v /var/lib/aetelier/datasets:/data:ro \
 #     -v /var/lib/aetelier/validate-state:/state \
 #     aetelier-validate:v0.1.0 \
-#     --flush-threshold 3600 --grid-period-ms 100 --verbose
+#     --flush-threshold 3600 --grid-period-us 100000 --verbose
 #
 # Notes
 # -----
@@ -102,5 +102,5 @@ CMD ["--data-dir", "/data", \
      "--state-file", "/state/validate_state.json", \
      "--report-out", "/state/last_report.json", \
      "--flush-threshold", "3600", \
-     "--grid-period-ms", "100", \
+     "--grid-period-us", "100000", \
      "--verbose"]

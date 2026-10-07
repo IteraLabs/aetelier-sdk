@@ -170,4 +170,18 @@ mod tests {
         let spread = testable_ob.spread().expect("spread should be Some");
         assert_eq!(decimal_to_f64(spread), 1.00);
     }
+
+    #[test]
+    fn effective_time_prefers_venue_then_receipt_then_snapshot_time() {
+        use crate::test_orderbook_utils::test_orderbook;
+        let mut ob = test_orderbook();
+        ob.orderbook_ts_us = 1_700_000_000_100_000;
+        ob.source_orderbook_ts_us = 1_700_000_000_042_000;
+        ob.local_orderbook_ts_us = 1_700_000_000_043_500;
+        assert_eq!(ob.effective_ts_us(), 1_700_000_000_042_000);
+        ob.source_orderbook_ts_us = 0;
+        assert_eq!(ob.effective_ts_us(), 1_700_000_000_043_500);
+        ob.local_orderbook_ts_us = 0;
+        assert_eq!(ob.effective_ts_us(), 1_700_000_000_100_000);
+    }
 }

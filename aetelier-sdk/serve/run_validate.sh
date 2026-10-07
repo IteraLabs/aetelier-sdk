@@ -20,7 +20,7 @@
 #   AETELIER_STATE_DIR      (default: /var/lib/aetelier/validate-state)
 #   AETELIER_VALIDATE_IMAGE (default: aetelier-validate:v0.1.0)
 #   AETELIER_FLUSH_THRESHOLD (default: 3600)
-#   AETELIER_GRID_PERIOD_MS  (default: 100)
+#   AETELIER_GRID_PERIOD_US  (default: 100000)
 #   AETELIER_LOG_FILE        (default: /var/log/aetelier/validate.log)
 
 set -euo pipefail
@@ -29,7 +29,7 @@ DATA_DIR="${AETELIER_DATA_DIR:-/var/lib/aetelier/datasets}"
 STATE_DIR="${AETELIER_STATE_DIR:-/var/lib/aetelier/validate-state}"
 IMAGE="${AETELIER_VALIDATE_IMAGE:-aetelier-validate:v0.1.0}"
 FLUSH_THRESHOLD="${AETELIER_FLUSH_THRESHOLD:-3600}"
-GRID_PERIOD_MS="${AETELIER_GRID_PERIOD_MS:-100}"
+GRID_PERIOD_US="${AETELIER_GRID_PERIOD_US:-100000}"
 LOG_FILE="${AETELIER_LOG_FILE:-/var/log/aetelier/validate.log}"
 
 mkdir -p "$STATE_DIR" "$(dirname "$LOG_FILE")"
@@ -47,7 +47,7 @@ docker run --rm \
     --state-file /state/validate_state.json \
     --report-out /state/last_report.json \
     --flush-threshold "${FLUSH_THRESHOLD}" \
-    --grid-period-ms "${GRID_PERIOD_MS}" \
+    --grid-period-us "${GRID_PERIOD_US}" \
     --skip-seen \
     --verbose \
     >> "$LOG_FILE" 2>&1

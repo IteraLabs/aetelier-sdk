@@ -178,10 +178,12 @@ pub fn write_funding_settlement_parquet_timestamped(
         .first()
         .map(|r| r.exchange.as_str())
         .unwrap_or("unknown");
-    let symbol = raw_symbol.replace('/', "-");
-    let filename = format!(
-        "{}_{}_funding_settlement_{}_{}.parquet",
-        exchange, symbol, mode, file_ts
+    let filename = crate::naming::file_name(
+        exchange,
+        &raw_symbol,
+        crate::naming::FileKind::FundingSettlement,
+        mode,
+        file_ts,
     );
     let path = crate::naming::unique_path(output_dir, &filename);
     write_funding_settlement_parquet(settlements, &path)?;

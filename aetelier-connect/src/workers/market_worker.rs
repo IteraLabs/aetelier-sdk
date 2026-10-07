@@ -2155,15 +2155,16 @@ fn feed_binance(
                     )
                 })
                 .collect();
+            let ts_us = upd.event_time * 1_000;
             let ob = aetelier_types::orderbooks::Orderbook::from_levels(
                 0,
-                upd.event_time,
+                ts_us,
                 pair.clone(),
                 "binance".to_string(),
                 bids,
                 asks,
             );
-            sync.on_orderbook(pair, upd.event_time, ob);
+            sync.on_orderbook(pair, ts_us, ob);
         }
         BinanceWssEvent::DepthSnapshot(snap) => {
             // Synthesised by BookInitializer from REST response.
@@ -2394,6 +2395,7 @@ mod tests {
     use crate::clients::disconnect::DisconnectReason;
     use crate::clients::reconnect::CircuitState;
     use crate::config::workers::common::ReconnectSection;
+    use crate::sources::binance::events::BinanceWssEvent;
 
     fn venue_failure() -> DisconnectReason {
         DisconnectReason::TransportError {
@@ -2638,5 +2640,28 @@ symbol = "BTCUSDT"
             ReconnectAction::CircuitOpen { .. }
         ));
         assert_eq!(policy.circuit_state(), CircuitState::Open);
+    }
+
+    #[test]
+    fn legacy_binance_depth_updates_stamp_books_in_microseconds() {
+        let depth = |event_time_ms: u64| {
+            BinanceWssEvent::DepthUpdate(
+                serde_json::from_str(&format!(
+                    r#"{{"e":"depthUpdate","E":{event_time_ms},"s":"BTCUSDT","U":1,"u":2,"b":[["100.0","1.0"]],"a":[["101.0","1.0"]]}}"#
+                ))
+                .unwrap(),
+            )
+        };
+        let pair = TradingPair::new("BTC", "USDT");
+        let mut sync = MarketSynchronizer::new(100_000);
+        feed_binance(&mut sync, &pair, &depth(1_791_321_096_929), 25);
+        feed_binance(&mut sync, &pair, &depth(1_791_321_097_129), 25);
+
+        let books: Vec<u64> = sync
+            .drain()
+            .iter()
+            .filter_map(|snap| snap.orderbook.as_ref().map(|ob| ob.orderbook_ts_us))
+            .collect();
+        assert_eq!(books.first(), Some(&1_791_321_096_929_000));
     }
 }
