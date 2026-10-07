@@ -13,7 +13,6 @@
 /// Error types for WebSocket and exchange operations
 pub mod errors;
 
-/// Communication clients (WebSocket, HTTP, RPC)
 pub mod clients;
 
 /// Worker-specific configuration

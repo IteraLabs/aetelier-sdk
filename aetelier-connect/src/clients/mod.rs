@@ -1,13 +1,13 @@
 //! Communication clients for exchange connectivity.
 //!
-//! This module provides generic transport clients ([`WssClient`](crate::clients::WssClient), [`HttpClient`](crate::clients::HttpClient))
-//! and the reconnection infrastructure ([`reconnect`](crate::clients::reconnect)) used by higher-level
+//! This module provides generic transport clients ([`WssClient`], [`HttpClient`])
+//! and the reconnection infrastructure ([`reconnect`]) used by higher-level
 //! workers.
 //!
 //! Exchange-specific clients (e.g. `BybitWssClient`) live in [`crate::sources`]
 //! and build on top of the types defined here.  Reconnection is **not** handled
 //! inside the clients themselves — it is the caller's responsibility, typically
-//! via a [`ReconnectPolicy`](crate::clients::reconnect::ReconnectPolicy).
+//! via a [`ReconnectPolicy`](reconnect::ReconnectPolicy).
 
 /// Policy for disconnections
 pub mod disconnect;
